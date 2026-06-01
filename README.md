@@ -52,6 +52,20 @@ pnpm tauri dev          # local run
 pnpm tauri build --target aarch64-pc-windows-msvc
 ```
 
+## CI
+
+The GitHub Actions workflow ships as `docs/build.yml.workflow-template`
+(the initial commit was pushed with an OAuth token lacking `workflow` scope).
+To activate it once:
+
+```powershell
+gh auth refresh -h github.com -s workflow
+mkdir .github\workflows
+git mv docs\build.yml.workflow-template .github\workflows\build.yml
+git commit -m "ci: enable Windows ARM64 build workflow"
+git push
+```
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
