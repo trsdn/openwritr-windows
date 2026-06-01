@@ -1,41 +1,32 @@
-"""Start/stop UI cues — Windows port of macOS SoundManager.swift.
+"""UI cues using Windows system sounds.
 
-Generates two short sine tones (ascending start ping, descending stop ping)
-and plays them via sounddevice on a dedicated output stream. Same shape and
-duration (~80 ms) as the macOS originals.
+We play short professionally-designed WAVs from C:\\Windows\\Media via
+winsound.PlaySound (async, non-blocking, no playback device kept open).
+Falls back silently if the file is missing or audio is unavailable.
 """
 from __future__ import annotations
-import numpy as np
-import sounddevice as sd
+import os
+import winsound
 
-_SR = 44_100
+MEDIA = r"C:\Windows\Media"
+_START = os.path.join(MEDIA, "Windows Navigation Start.wav")
+_STOP = os.path.join(MEDIA, "Windows Menu Command.wav")
 
-
-def _tone(freq: float, duration: float, ascending: bool) -> np.ndarray:
-    n = int(_SR * duration)
-    t = np.arange(n, dtype=np.float32) / _SR
-    progress = t / duration
-    multiplier = 0.8 + 0.4 * progress if ascending else 1.2 - 0.4 * progress
-    inst_freq = freq * multiplier
-    attack = np.minimum(1.0, progress * 10)
-    decay = (1.0 - progress) ** (2 if ascending else 3)
-    env = attack * decay
-    return (env * np.sin(2 * np.pi * inst_freq * t) * 0.3).astype(np.float32)
+_FLAGS = winsound.SND_FILENAME | winsound.SND_ASYNC | winsound.SND_NODEFAULT
 
 
-_START = _tone(440, 0.08, ascending=True)
-_STOP = _tone(330, 0.08, ascending=False)
+def _play(path: str) -> None:
+    if not os.path.isfile(path):
+        return
+    try:
+        winsound.PlaySound(path, _FLAGS)
+    except Exception:
+        pass
 
 
 def play_start() -> None:
-    try:
-        sd.play(_START, _SR, blocking=False)
-    except Exception:
-        pass
+    _play(_START)
 
 
 def play_stop() -> None:
-    try:
-        sd.play(_STOP, _SR, blocking=False)
-    except Exception:
-        pass
+    _play(_STOP)

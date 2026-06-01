@@ -16,3 +16,10 @@ models/*.onnx
 models/*.bin
 .vscode/
 .idea/
+
+.venv/
+app_run.log
+app_out.log
+app_err.log
+__pycache__/
+*.pyc

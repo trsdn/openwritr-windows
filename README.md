@@ -1,14 +1,46 @@
 # OpenWritr for Windows (ARM64)
 
+![OpenWritr — for Windows on ARM](docs/img/hero.png)
+
 [![Windows ARM64](https://img.shields.io/badge/Windows-ARM64-0078D4?logo=windows)](https://github.com/trsdn/openwritr-windows)
-[![Tauri 2](https://img.shields.io/badge/Tauri-2-FFC131?logo=tauri)](https://tauri.app)
-[![Rust](https://img.shields.io/badge/Rust-stable-DEA584?logo=rust)](https://www.rust-lang.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-Windows-on-ARM port of [trsdn/OpenWritr](https://github.com/trsdn/OpenWritr) — a push-to-talk voice-to-text tray app.
-Local transcription via **NVIDIA Parakeet TDT v3** running on the **Snapdragon X Hexagon NPU** through ONNX Runtime + QNN EP.
+Push-to-talk voice-to-text tray app for **Windows on ARM** (Snapdragon X).
+Local transcription via **NVIDIA Parakeet TDT 0.6B v3** (INT8 ONNX, 25 languages),
+~40× realtime on the Snapdragon X CPU. Optional LLM cleanup via GitHub Copilot
+or any OpenAI-compatible endpoint.
 
-> **Status: scaffold** — building blocks in place, model export & NPU runtime in progress. See [plan.md](docs/plan.md).
+Windows port of [trsdn/OpenWritr](https://github.com/trsdn/OpenWritr).
+
+## Quick start
+
+```powershell
+git clone https://github.com/trsdn/openwritr-windows.git
+cd openwritr-windows
+py -3.11-arm64 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r python\requirements.txt
+python python\fetch_model.py        # ~640 MB, one-time
+python python\openwritr.py
+```
+
+A blue microphone icon appears in your system tray. **Hold `Ctrl + Shift + Space`**,
+speak, release — the text is pasted at the caret.
+
+![Overlay while recording](docs/img/overlay-listening.png)
+
+Right-click the tray icon for **Settings…** to configure the hotkey, toggle the
+overlay/sounds, and choose an LLM enhance provider (GitHub Copilot or any
+OpenAI-compatible API).
+
+## Features
+
+- Push-to-talk hotkey with live audio-level meter overlay (Mica backdrop, Fluent style)
+- 25 languages, runs fully offline after the one-time model download
+- Optional cleanup pass via **GitHub Copilot** (uses your `gh auth token`) or any **OpenAI-compatible** endpoint
+- Auto-paste at cursor, clipboard save/restore
+- Start/stop sounds (Windows system WAVs)
+- HiDPI-correct rendering on Surface Pro displays
 
 ## Status
 

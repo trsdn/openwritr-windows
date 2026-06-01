@@ -1,17 +1,4 @@
-"""
-OpenWritr for Windows — push-to-talk voice-to-text tray app.
-
-Architecture:
-- Tk root on the MAIN thread owns the floating overlay window
-- pystray runs detached on a background thread (Windows tray icon)
-- pynput keyboard listener runs on its own thread (hotkey FSM)
-- sounddevice InputStream owns the audio thread (16 kHz mono ring buffer)
-- onnx-asr (Parakeet TDT v3 INT8) on a worker thread, results marshalled
-  back to the main thread via root.after()
-
-Default hotkey: hold Ctrl+Shift+Space to record. Releasing transcribes the
-captured audio and pastes it at the caret.
-"""
+"""OpenWritr for Windows — push-to-talk voice-to-text tray app."""
 from __future__ import annotations
 import os
 import sys
@@ -31,8 +18,10 @@ from PIL import Image, ImageDraw
 import pystray
 import onnx_asr
 
-from overlay import Overlay
+from overlay import Overlay, enable_dpi_awareness
+from settings_launcher import SettingsLauncher
 import sounds
+import enhance as enhance_mod
 
 APP_NAME = "OpenWritr"
 APPDATA = Path(os.environ.get("LOCALAPPDATA", Path.home())) / APP_NAME
@@ -40,7 +29,6 @@ MODEL_DIR = APPDATA / "models" / "parakeet-tdt-0.6b-v3"
 LOG_DIR = APPDATA / "logs"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 SETTINGS_PATH = APPDATA / "settings.json"
-
 SAMPLE_RATE = 16_000
 CHANNELS = 1
 
@@ -62,16 +50,20 @@ DEFAULTS = {
     "sounds": True,
     "min_record_seconds": 0.25,
     "max_record_seconds": 60,
+    "enhance": {"provider": "off", "base_url": "https://api.openai.com/v1", "api_key": "", "model": "gpt-4o-mini"},
 }
 
 
 def load_settings() -> dict:
     if SETTINGS_PATH.exists():
         try:
-            return {**DEFAULTS, **json.loads(SETTINGS_PATH.read_text("utf-8"))}
+            data = json.loads(SETTINGS_PATH.read_text("utf-8"))
+            merged = {**DEFAULTS, **data}
+            merged["enhance"] = {**DEFAULTS["enhance"], **(data.get("enhance") or {})}
+            return merged
         except Exception as e:
             log.warning("settings load failed: %s", e)
-    return dict(DEFAULTS)
+    return {**DEFAULTS, "enhance": dict(DEFAULTS["enhance"])}
 
 
 def save_settings(s: dict) -> None:
@@ -81,8 +73,9 @@ def save_settings(s: dict) -> None:
 
 # ---------- Audio capture ----------
 class AudioRecorder:
-    def __init__(self, samplerate: int = SAMPLE_RATE) -> None:
+    def __init__(self, samplerate: int = SAMPLE_RATE, on_level=None) -> None:
         self.samplerate = samplerate
+        self.on_level = on_level
         self._q: queue.Queue[np.ndarray] = queue.Queue()
         self._stream: sd.InputStream | None = None
 
@@ -90,6 +83,13 @@ class AudioRecorder:
         if status:
             log.debug("audio status: %s", status)
         self._q.put(indata.copy())
+        if self.on_level is not None:
+            rms = float(np.sqrt(np.mean(indata.astype(np.float32) ** 2)) + 1e-9)
+            level = min(1.0, (rms / 0.08) ** 0.6)
+            try:
+                self.on_level(level)
+            except Exception:
+                pass
 
     def start(self) -> None:
         if self._stream is not None:
@@ -97,11 +97,8 @@ class AudioRecorder:
         while not self._q.empty():
             self._q.get_nowait()
         self._stream = sd.InputStream(
-            samplerate=self.samplerate,
-            channels=CHANNELS,
-            dtype="float32",
-            callback=self._cb,
-            blocksize=1600,
+            samplerate=self.samplerate, channels=CHANNELS, dtype="float32",
+            callback=self._cb, blocksize=1600,
         )
         self._stream.start()
 
@@ -136,10 +133,8 @@ class Transcriber:
             audio = audio.astype(np.float32)
         t0 = time.time()
         text = self.model.recognize(audio)
-        log.info(
-            "transcribed %.1fs audio in %.2fs -> %r",
-            len(audio) / SAMPLE_RATE, time.time() - t0, text,
-        )
+        log.info("transcribed %.1fs audio in %.2fs -> %r",
+                 len(audio) / SAMPLE_RATE, time.time() - t0, text)
         return text.strip() if isinstance(text, str) else ""
 
 
@@ -182,15 +177,26 @@ class HotkeyEngine:
         self.settings = settings
         self.recorder = recorder
         self.transcriber = transcriber
-        self.on_state = on_state   # called as on_state(new_state, text_or_none)
+        self.on_state = on_state
         self._pressed_mods = {m: False for m in MOD_MAP}
         self._recording = False
         self._record_started_at = 0.0
+        self._enhanced_for_this_press = False
         self._lock = threading.Lock()
 
+    def _required_mods(self) -> set[str]:
+        return set(self.settings.get("hotkey_modifiers", ["ctrl", "shift"]))
+
     def _mods_ok(self) -> bool:
-        wanted = set(self.settings.get("hotkey_modifiers", []))
-        return all(self._pressed_mods.get(m, False) for m in wanted)
+        return all(self._pressed_mods.get(m, False) for m in self._required_mods())
+
+    def _enhance_active(self) -> bool:
+        # Enhanced mode: required mods + Alt pressed (Alt is the discriminator),
+        # unless the user has already configured Alt as a required mod, in which
+        # case Win serves the same role.
+        if "alt" not in self._required_mods():
+            return self._pressed_mods.get("alt", False)
+        return self._pressed_mods.get("win", False)
 
     def _on_press(self, key):
         for name, keys in MOD_MAP.items():
@@ -202,12 +208,13 @@ class HotkeyEngine:
                 if not self._recording:
                     self._recording = True
                     self._record_started_at = time.time()
+                    self._enhanced_for_this_press = self._enhance_active()
                     try:
                         self.recorder.start()
-                        self.on_state("listening", None)
+                        self.on_state("listening", None, self._enhanced_for_this_press)
                         if self.settings.get("sounds", True):
                             sounds.play_start()
-                        log.info("recording started")
+                        log.info("recording started (enhanced=%s)", self._enhanced_for_this_press)
                     except Exception:
                         log.exception("recorder start failed")
                         self._recording = False
@@ -227,20 +234,26 @@ class HotkeyEngine:
                     sounds.play_stop()
                 if dur < float(self.settings.get("min_record_seconds", 0.25)):
                     log.info("recording too short (%.2fs), discarding", dur)
-                    self.on_state("idle", None)
+                    self.on_state("idle", None, False)
                     return
-                threading.Thread(target=self._run_transcribe, args=(audio,), daemon=True).start()
+                enhanced = self._enhanced_for_this_press
+                threading.Thread(target=self._run_transcribe, args=(audio, enhanced), daemon=True).start()
 
-    def _run_transcribe(self, audio: np.ndarray):
+    def _run_transcribe(self, audio: np.ndarray, enhanced: bool):
         try:
-            self.on_state("transcribing", None)
+            self.on_state("transcribing", None, enhanced)
             text = self.transcriber.transcribe(audio)
+            if text and enhanced:
+                self.on_state("enhancing", None, enhanced)
+                t0 = time.time()
+                text = enhance_mod.enhance(text, self.settings)
+                log.info("enhanced in %.2fs", time.time() - t0)
             if text and self.settings.get("auto_paste", True):
                 paste_text(text)
-            self.on_state("done", text or None)
+            self.on_state("done", text or None, enhanced)
         except Exception:
             log.exception("transcription failed")
-            self.on_state("error", None)
+            self.on_state("error", None, False)
 
     def run(self):
         listener = keyboard.Listener(
@@ -272,41 +285,40 @@ def make_tray_icon(state: str = "idle") -> Image.Image:
 
 
 class TrayController:
-    def __init__(self, settings: dict, on_quit) -> None:
+    def __init__(self, settings: dict, on_open_settings, on_quit) -> None:
         self.settings = settings
+        self.on_open_settings = on_open_settings
         self.on_quit = on_quit
         self.icon = pystray.Icon(
-            APP_NAME,
-            make_tray_icon("idle"),
-            APP_NAME,
+            APP_NAME, make_tray_icon("idle"), APP_NAME,
             menu=pystray.Menu(
                 pystray.MenuItem(lambda _: f"Hotkey: {self._hotkey_label()}", None, enabled=False),
+                pystray.MenuItem(lambda _: f"Enhance: {self._enhance_label()}", None, enabled=False),
                 pystray.Menu.SEPARATOR,
-                pystray.MenuItem("Auto-paste", self._toggle("auto_paste"),
-                                 checked=lambda i: self.settings.get("auto_paste", True)),
-                pystray.MenuItem("Show overlay", self._toggle("overlay"),
-                                 checked=lambda i: self.settings.get("overlay", True)),
-                pystray.MenuItem("Play sounds", self._toggle("sounds"),
-                                 checked=lambda i: self.settings.get("sounds", True)),
-                pystray.Menu.SEPARATOR,
+                pystray.MenuItem("Settings…", lambda *_: self.on_open_settings()),
                 pystray.MenuItem("Open log folder", lambda *_: os.startfile(LOG_DIR)),
+                pystray.Menu.SEPARATOR,
                 pystray.MenuItem("Quit", lambda *_: self.on_quit()),
             ),
         )
 
     def _hotkey_label(self) -> str:
         mods = "+".join(m.capitalize() for m in self.settings.get("hotkey_modifiers", []))
-        return f"{mods}+Space (hold)"
+        return f"{mods}+Space"
 
-    def _toggle(self, key: str):
-        def handler(*_):
-            self.settings[key] = not self.settings.get(key, True)
-            save_settings(self.settings)
-        return handler
+    def _enhance_label(self) -> str:
+        prov = (self.settings.get("enhance") or {}).get("provider", "off")
+        return {"off": "off", "github_copilot": "GitHub Copilot", "openai_compatible": "OpenAI API"}.get(prov, prov)
 
     def set_state(self, state: str) -> None:
         try:
             self.icon.icon = make_tray_icon(state)
+        except Exception:
+            pass
+
+    def refresh_menu(self) -> None:
+        try:
+            self.icon.update_menu()
         except Exception:
             pass
 
@@ -320,41 +332,65 @@ class TrayController:
             pass
 
 
-# ---------- App orchestration ----------
+# ---------- App ----------
 class App:
     def __init__(self) -> None:
         self.settings = load_settings()
         self.transcriber = Transcriber(MODEL_DIR)
-        self.recorder = AudioRecorder()
+        self.dpi = enable_dpi_awareness()
+        log.info("DPI scale: %.2fx", self.dpi)
         self.root = tk.Tk()
-        self.root.withdraw()  # hide invisible root; only the overlay shows
-        self.overlay = Overlay(self.root)
-        self.tray = TrayController(self.settings, self.quit)
+        try:
+            self.root.tk.call("tk", "scaling", self.dpi)
+        except tk.TclError:
+            pass
+        self.root.withdraw()
+        self.overlay = Overlay(self.root, dpi_scale=self.dpi)
+        self.recorder = AudioRecorder(on_level=self.overlay.set_level)
+        self.settings_ui = SettingsLauncher(self._reload_settings_from_disk)
+        self.tray = TrayController(self.settings, self._open_settings, self.quit)
         self.engine = HotkeyEngine(self.settings, self.recorder, self.transcriber, self._on_state)
         self._listener = None
 
-    def _on_state(self, state: str, text: str | None) -> None:
-        # Marshal everything to the Tk main thread.
-        self.root.after(0, lambda: self._apply_state(state, text))
+    def _open_settings(self) -> None:
+        self.settings_ui.open()
 
-    def _apply_state(self, state: str, text: str | None) -> None:
+    def _reload_settings_from_disk(self) -> None:
+        new = load_settings()
+        self.settings.clear()
+        self.settings.update(new)
+        self.tray.refresh_menu()
+        log.info("settings reloaded: hotkey=%s enhance=%s",
+                 "+".join(self.settings["hotkey_modifiers"]),
+                 (self.settings.get("enhance") or {}).get("provider"))
+
+    def _on_settings_saved(self, new: dict) -> None:
+        self.settings.clear()
+        self.settings.update(new)
+        save_settings(self.settings)
+        self.tray.refresh_menu()
+        log.info("settings saved: hotkey=%s enhance=%s",
+                 "+".join(self.settings["hotkey_modifiers"]),
+                 (self.settings.get("enhance") or {}).get("provider"))
+
+    def _on_state(self, state: str, text: str | None, enhanced: bool) -> None:
+        self.root.after(0, lambda: self._apply_state(state, text, enhanced))
+
+    def _apply_state(self, state: str, text: str | None, enhanced: bool) -> None:
         self.tray.set_state(state if state != "done" else "idle")
         if not self.settings.get("overlay", True):
             self.overlay.hide()
             return
-        if state == "listening":
-            self.overlay.show("listening")
-        elif state == "transcribing":
-            self.overlay.show("transcribing")
-        elif state == "enhancing":
-            self.overlay.show("enhancing")
+        if state in ("listening", "transcribing", "enhancing"):
+            self.overlay.show(state)
         elif state == "done":
-            self.overlay.show_briefly("done", 900)
+            self.overlay.show_briefly("done", 700)
         elif state in ("idle", "error"):
             self.overlay.hide()
 
     def run(self) -> None:
-        log.info("OpenWritr ready — Hotkey: Ctrl+Shift+Space (hold)")
+        log.info("OpenWritr ready — %s+Space (hold)",
+                 "+".join(m.capitalize() for m in self.settings["hotkey_modifiers"]))
         self.tray.run_detached()
         self._listener = self.engine.run()
         try:
