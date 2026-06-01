@@ -1,10 +1,16 @@
 """
 OpenWritr for Windows — push-to-talk voice-to-text tray app.
 
-- Tray icon (pystray)
-- Hold Ctrl+Shift+Space to record; release to transcribe + paste at caret.
-- Local ASR: NVIDIA Parakeet TDT 0.6B v3 (INT8) via onnx-asr.
-- Model dir: %LOCALAPPDATA%\\OpenWritr\\models\\parakeet-tdt-0.6b-v3
+Architecture:
+- Tk root on the MAIN thread owns the floating overlay window
+- pystray runs detached on a background thread (Windows tray icon)
+- pynput keyboard listener runs on its own thread (hotkey FSM)
+- sounddevice InputStream owns the audio thread (16 kHz mono ring buffer)
+- onnx-asr (Parakeet TDT v3 INT8) on a worker thread, results marshalled
+  back to the main thread via root.after()
+
+Default hotkey: hold Ctrl+Shift+Space to record. Releasing transcribes the
+captured audio and pastes it at the caret.
 """
 from __future__ import annotations
 import os
@@ -14,6 +20,7 @@ import time
 import queue
 import threading
 import logging
+import tkinter as tk
 from pathlib import Path
 
 import numpy as np
@@ -23,6 +30,9 @@ import pyperclip
 from PIL import Image, ImageDraw
 import pystray
 import onnx_asr
+
+from overlay import Overlay
+import sounds
 
 APP_NAME = "OpenWritr"
 APPDATA = Path(os.environ.get("LOCALAPPDATA", Path.home())) / APP_NAME
@@ -45,10 +55,11 @@ logging.basicConfig(
 log = logging.getLogger("openwritr")
 
 
-# ---------- Settings ----------
 DEFAULTS = {
-    "hotkey_modifiers": ["ctrl", "shift"],  # plus 'space'
+    "hotkey_modifiers": ["ctrl", "shift"],
     "auto_paste": True,
+    "overlay": True,
+    "sounds": True,
     "min_record_seconds": 0.25,
     "max_record_seconds": 60,
 }
@@ -90,7 +101,7 @@ class AudioRecorder:
             channels=CHANNELS,
             dtype="float32",
             callback=self._cb,
-            blocksize=1600,  # 100 ms
+            blocksize=1600,
         )
         self._stream.start()
 
@@ -167,11 +178,11 @@ TRIGGER = keyboard.Key.space
 
 
 class HotkeyEngine:
-    def __init__(self, settings, recorder, transcriber, status_cb) -> None:
+    def __init__(self, settings, recorder, transcriber, on_state) -> None:
         self.settings = settings
         self.recorder = recorder
         self.transcriber = transcriber
-        self.status_cb = status_cb
+        self.on_state = on_state   # called as on_state(new_state, text_or_none)
         self._pressed_mods = {m: False for m in MOD_MAP}
         self._recording = False
         self._record_started_at = 0.0
@@ -193,7 +204,9 @@ class HotkeyEngine:
                     self._record_started_at = time.time()
                     try:
                         self.recorder.start()
-                        self.status_cb("recording")
+                        self.on_state("listening", None)
+                        if self.settings.get("sounds", True):
+                            sounds.play_start()
                         log.info("recording started")
                     except Exception:
                         log.exception("recorder start failed")
@@ -210,22 +223,24 @@ class HotkeyEngine:
                 self._recording = False
                 dur = time.time() - self._record_started_at
                 audio = self.recorder.stop()
-                self.status_cb("idle")
+                if self.settings.get("sounds", True):
+                    sounds.play_stop()
                 if dur < float(self.settings.get("min_record_seconds", 0.25)):
                     log.info("recording too short (%.2fs), discarding", dur)
+                    self.on_state("idle", None)
                     return
                 threading.Thread(target=self._run_transcribe, args=(audio,), daemon=True).start()
 
     def _run_transcribe(self, audio: np.ndarray):
         try:
-            self.status_cb("transcribing")
+            self.on_state("transcribing", None)
             text = self.transcriber.transcribe(audio)
             if text and self.settings.get("auto_paste", True):
                 paste_text(text)
-            self.status_cb("idle")
+            self.on_state("done", text or None)
         except Exception:
             log.exception("transcription failed")
-            self.status_cb("error")
+            self.on_state("error", None)
 
     def run(self):
         listener = keyboard.Listener(
@@ -236,67 +251,125 @@ class HotkeyEngine:
 
 
 # ---------- Tray ----------
-def make_icon(state: str = "idle") -> Image.Image:
+TRAY_COLORS = {
+    "idle": (74, 144, 226, 255),
+    "listening": (220, 38, 38, 255),
+    "transcribing": (245, 158, 11, 255),
+    "enhancing": (37, 99, 235, 255),
+    "done": (22, 163, 74, 255),
+    "error": (107, 114, 128, 255),
+}
+
+
+def make_tray_icon(state: str = "idle") -> Image.Image:
     img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
-    color = {
-        "idle": (74, 144, 226, 255),
-        "recording": (220, 38, 38, 255),
-        "transcribing": (245, 158, 11, 255),
-        "error": (107, 114, 128, 255),
-    }.get(state, (74, 144, 226, 255))
+    color = TRAY_COLORS.get(state, TRAY_COLORS["idle"])
     d.rounded_rectangle((24, 10, 40, 38), radius=8, fill=color)
     d.rectangle((31, 38, 33, 50), fill=color)
     d.rectangle((20, 50, 44, 52), fill=color)
     return img
 
 
-class TrayApp:
-    def __init__(self, settings, transcriber):
+class TrayController:
+    def __init__(self, settings: dict, on_quit) -> None:
         self.settings = settings
-        self.recorder = AudioRecorder()
-        self.transcriber = transcriber
+        self.on_quit = on_quit
         self.icon = pystray.Icon(
             APP_NAME,
-            make_icon("idle"),
+            make_tray_icon("idle"),
             APP_NAME,
             menu=pystray.Menu(
                 pystray.MenuItem(lambda _: f"Hotkey: {self._hotkey_label()}", None, enabled=False),
-                pystray.MenuItem(
-                    "Auto-paste",
-                    self._toggle_paste,
-                    checked=lambda item: self.settings.get("auto_paste", True),
-                ),
                 pystray.Menu.SEPARATOR,
-                pystray.MenuItem("Open log folder", self._open_logs),
-                pystray.MenuItem("Quit", self._quit),
+                pystray.MenuItem("Auto-paste", self._toggle("auto_paste"),
+                                 checked=lambda i: self.settings.get("auto_paste", True)),
+                pystray.MenuItem("Show overlay", self._toggle("overlay"),
+                                 checked=lambda i: self.settings.get("overlay", True)),
+                pystray.MenuItem("Play sounds", self._toggle("sounds"),
+                                 checked=lambda i: self.settings.get("sounds", True)),
+                pystray.Menu.SEPARATOR,
+                pystray.MenuItem("Open log folder", lambda *_: os.startfile(LOG_DIR)),
+                pystray.MenuItem("Quit", lambda *_: self.on_quit()),
             ),
         )
-        self.engine = HotkeyEngine(settings, self.recorder, self.transcriber, self._set_state)
 
     def _hotkey_label(self) -> str:
         mods = "+".join(m.capitalize() for m in self.settings.get("hotkey_modifiers", []))
         return f"{mods}+Space (hold)"
 
-    def _toggle_paste(self, _icon, _item):
-        self.settings["auto_paste"] = not self.settings.get("auto_paste", True)
-        save_settings(self.settings)
+    def _toggle(self, key: str):
+        def handler(*_):
+            self.settings[key] = not self.settings.get(key, True)
+            save_settings(self.settings)
+        return handler
 
-    def _open_logs(self, _icon, _item):
-        os.startfile(LOG_DIR)
-
-    def _quit(self, _icon, _item):
-        self.icon.stop()
-
-    def _set_state(self, state: str):
+    def set_state(self, state: str) -> None:
         try:
-            self.icon.icon = make_icon(state)
+            self.icon.icon = make_tray_icon(state)
         except Exception:
             pass
 
-    def run(self):
-        self.engine.run()
-        self.icon.run()
+    def run_detached(self) -> None:
+        self.icon.run_detached()
+
+    def stop(self) -> None:
+        try:
+            self.icon.stop()
+        except Exception:
+            pass
+
+
+# ---------- App orchestration ----------
+class App:
+    def __init__(self) -> None:
+        self.settings = load_settings()
+        self.transcriber = Transcriber(MODEL_DIR)
+        self.recorder = AudioRecorder()
+        self.root = tk.Tk()
+        self.root.withdraw()  # hide invisible root; only the overlay shows
+        self.overlay = Overlay(self.root)
+        self.tray = TrayController(self.settings, self.quit)
+        self.engine = HotkeyEngine(self.settings, self.recorder, self.transcriber, self._on_state)
+        self._listener = None
+
+    def _on_state(self, state: str, text: str | None) -> None:
+        # Marshal everything to the Tk main thread.
+        self.root.after(0, lambda: self._apply_state(state, text))
+
+    def _apply_state(self, state: str, text: str | None) -> None:
+        self.tray.set_state(state if state != "done" else "idle")
+        if not self.settings.get("overlay", True):
+            self.overlay.hide()
+            return
+        if state == "listening":
+            self.overlay.show("listening")
+        elif state == "transcribing":
+            self.overlay.show("transcribing")
+        elif state == "enhancing":
+            self.overlay.show("enhancing")
+        elif state == "done":
+            self.overlay.show_briefly("done", 900)
+        elif state in ("idle", "error"):
+            self.overlay.hide()
+
+    def run(self) -> None:
+        log.info("OpenWritr ready — Hotkey: Ctrl+Shift+Space (hold)")
+        self.tray.run_detached()
+        self._listener = self.engine.run()
+        try:
+            self.root.mainloop()
+        finally:
+            self.tray.stop()
+
+    def quit(self) -> None:
+        log.info("OpenWritr quitting")
+        try:
+            if self._listener is not None:
+                self._listener.stop()
+        except Exception:
+            pass
+        self.root.after(0, self.root.destroy)
 
 
 def main() -> int:
@@ -304,11 +377,10 @@ def main() -> int:
         log.error("Model directory not found: %s", MODEL_DIR)
         log.error("Run: python python/fetch_model.py")
         return 2
-    settings = load_settings()
-    transcriber = Transcriber(MODEL_DIR)
-    app = TrayApp(settings, transcriber)
-    log.info("OpenWritr ready — %s", app._hotkey_label())
-    app.run()
+    try:
+        App().run()
+    except KeyboardInterrupt:
+        pass
     return 0
 
 
