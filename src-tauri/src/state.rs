@@ -9,6 +9,3 @@ impl App {
         Self { active_ep: RwLock::new("probing…".into()) }
     }
 }
-
-// pulled in via tauri's transitive dep tree — declared here to surface the use
-extern crate parking_lot;
