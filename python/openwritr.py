@@ -44,7 +44,7 @@ log = logging.getLogger("openwritr")
 
 
 DEFAULTS = {
-    "hotkey_modifiers": ["ctrl", "shift"],
+    "hotkey_modifiers": ["ctrl", "win"],
     "auto_paste": True,
     "overlay": True,
     "sounds": True,

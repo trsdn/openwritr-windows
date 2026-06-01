@@ -24,8 +24,9 @@ python python\fetch_model.py        # ~640 MB, one-time
 python python\openwritr.py
 ```
 
-A blue microphone icon appears in your system tray. **Hold `Ctrl + Shift + Space`**,
-speak, release — the text is pasted at the caret.
+A blue microphone icon appears in your system tray. **Hold `Ctrl + Win + Space`**,
+speak, release — the text is pasted at the caret. **Hold `Ctrl + Win + Alt + Space`**
+to also run an LLM cleanup pass (configure provider in Settings).
 
 ![Overlay while recording](docs/img/overlay-listening.png)
 
