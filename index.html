@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>OpenWritr</title>
+    <style>
+      body { font-family: -apple-system, "Segoe UI", system-ui, sans-serif;
+             margin: 0; padding: 24px; background: #1a1a1a; color: #eaeaea; }
+      h1 { font-size: 18px; margin: 0 0 12px; }
+      .row { margin: 8px 0; font-size: 13px; }
+      .key { color: #9aa; }
+    </style>
+  </head>
+  <body>
+    <h1>OpenWritr — Settings</h1>
+    <div class="row"><span class="key">Hotkey:</span> Ctrl + Space (hold to record)</div>
+    <div class="row"><span class="key">Enhanced:</span> Shift + Ctrl + Space</div>
+    <div class="row"><span class="key">Inference:</span> <span id="ep">detecting…</span></div>
+    <script type="module">
+      import { invoke } from "@tauri-apps/api/core";
+      try {
+        const ep = await invoke("get_active_ep");
+        document.getElementById("ep").textContent = ep;
+      } catch (e) {
+        document.getElementById("ep").textContent = "unavailable";
+      }
+    </script>
+  </body>
+</html>
