@@ -10,6 +10,16 @@ Local transcription via **NVIDIA Parakeet TDT v3** running on the **Snapdragon X
 
 > **Status: scaffold** — building blocks in place, model export & NPU runtime in progress. See [plan.md](docs/plan.md).
 
+## Status
+
+| Build | State | Latency on Snapdragon X |
+|---|---|---|
+| **Python (`python/`)** | **runs today** | 0.27s / 11s audio = ~43x realtime on CPU |
+| Rust + Tauri (`src-tauri/`) | scaffold + ASR pipeline code-complete, not built | target: NPU < 1s |
+
+Start with the [Python build](python/README.md). The Rust port is the long-term
+target for a smaller, NPU-accelerated bundle.
+
 ## Target Performance
 
 | Metric | macOS (ANE) | Windows ARM64 target |
