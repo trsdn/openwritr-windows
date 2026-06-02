@@ -34,6 +34,23 @@ fn main() -> anyhow::Result<()> {
         add_file(&mut z, Path::new("LICENSE"), "LICENSE", opts)?;
     }
 
+    // Third-party licence files for the bundled Qualcomm QNN runtime DLLs.
+    // We resolve them from the staged `target/release/` folder if present
+    // (copied there from `.venv\Lib\site-packages\onnxruntime_qnn\`), with
+    // a fallback to the venv itself for fresh checkouts.
+    let venv_qnn = Path::new(".venv/Lib/site-packages/onnxruntime_qnn");
+    for (src_name, zip_name) in [
+        ("Qualcomm_LICENSE.pdf", "third-party-licenses/Qualcomm_LICENSE.pdf"),
+        ("ThirdPartyNotices.txt", "third-party-licenses/ThirdPartyNotices.txt"),
+        ("LICENSE", "third-party-licenses/onnxruntime-qnn-LICENSE.txt"),
+        ("Privacy.md", "third-party-licenses/onnxruntime-qnn-Privacy.md"),
+    ] {
+        let candidates = [target.join(src_name), venv_qnn.join(src_name)];
+        if let Some(p) = candidates.iter().find(|p| p.exists()) {
+            add_file(&mut z, p, zip_name, opts)?;
+        }
+    }
+
     z.finish()?;
     let size = out_zip.metadata()?.len();
     println!("done -> {} ({:.2} MB)", out_zip.display(), size as f32 / 1_000_000.0);
