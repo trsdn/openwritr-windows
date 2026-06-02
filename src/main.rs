@@ -3,7 +3,9 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod asr;
 mod audio;
+mod download;
 mod hotkey;
 mod paths;
 mod settings;
