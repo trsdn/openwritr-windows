@@ -8,6 +8,7 @@ mod audio;
 mod download;
 mod enhance;
 mod hotkey;
+mod overlay;
 mod paths;
 mod settings;
 mod settings_ui;

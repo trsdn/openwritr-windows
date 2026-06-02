@@ -7,13 +7,15 @@
 //! over a crossbeam-style channel into the winit loop, which translates
 //! them into recorder/tray/engine actions.
 
-use crate::{asr, audio::Recorder, enhance, hotkey, settings::Settings, sounds, tray};
+use crate::overlay;
+use crate::{asr, audio::Recorder, enhance, hotkey, paths, settings::Settings, sounds, tray};
 use anyhow::Result;
 use arboard::Clipboard;
 use enigo::{Direction, Enigo, Key, Keyboard, Settings as EnigoSettings};
+use std::os::windows::process::CommandExt;
+use std::process::Stdio;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    mpsc::{self, Receiver, Sender},
     Arc,
 };
 use std::thread;
@@ -22,13 +24,20 @@ use tracing::{info, warn};
 use tray_icon::menu::MenuEvent;
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
-use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::window::WindowId;
 
-enum HkEvent {
-    Press,
-    Release,
+#[derive(Debug, Clone, Copy)]
+pub enum UserEvent {
+    HotkeyPress,
+    HotkeyRelease,
+    TranscribeDone,
+    Tick,
 }
+
+// DETACHED_PROCESS | CREATE_NO_WINDOW — child fully decoupled from parent
+const DETACHED_PROCESS: u32 = 0x0000_0008;
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 struct State {
     settings: Settings,
@@ -37,7 +46,6 @@ struct State {
     record_started: Option<Instant>,
     engine: Option<Arc<dyn asr::Engine>>,
     engine_loading: Arc<AtomicBool>,
-    hk_rx: Receiver<HkEvent>,
     hk_stop: Arc<AtomicBool>,
 }
 
@@ -46,9 +54,21 @@ pub fn run() -> Result<()> {
     let recorder = Recorder::new()?;
     let tray = tray::Tray::new(&settings)?;
 
-    let (hk_tx, hk_rx) = mpsc::channel::<HkEvent>();
+    let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
+    let proxy = event_loop.create_proxy();
+
     let hk_stop = Arc::new(AtomicBool::new(false));
-    spawn_hotkey_thread(settings.clone(), hk_tx, hk_stop.clone())?;
+    spawn_hotkey_thread(settings.clone(), proxy.clone(), hk_stop.clone())?;
+    spawn_tick_thread(proxy);
+
+    // Visual recording indicator on its own thread + own Win32 message loop.
+    // It only reads atomics from the recorder, so there's no shared state with
+    // the main winit/tray loop that could deadlock.
+    overlay::spawn(overlay::OverlayHandles {
+        recording: recorder.recording.clone(),
+        level_x10000: recorder.last_rms_x10000.clone(),
+        stop: hk_stop.clone(),
+    });
 
     let engine_loading = Arc::new(AtomicBool::new(false));
     let state = State {
@@ -58,12 +78,13 @@ pub fn run() -> Result<()> {
         record_started: None,
         engine: None,
         engine_loading,
-        hk_rx,
         hk_stop,
     };
 
-    let event_loop = EventLoop::new()?;
-    event_loop.set_control_flow(ControlFlow::Poll);
+    // Wait mode: loop sleeps until a message arrives (tray click, user event,
+    // window event). The hotkey + tick threads wake it via EventLoopProxy.
+    // No more thread::sleep inside the message pump → tray stays responsive.
+    event_loop.set_control_flow(ControlFlow::Wait);
 
     let mut app = AppHandler { state };
     app.start_engine_load();
@@ -73,18 +94,31 @@ pub fn run() -> Result<()> {
 
 fn spawn_hotkey_thread(
     initial: Settings,
-    tx: Sender<HkEvent>,
+    proxy: EventLoopProxy<UserEvent>,
     stop: Arc<AtomicBool>,
 ) -> Result<()> {
-    // The thread re-reads settings.json after a small debounce so changes
-    // from the settings subprocess take effect without needing a restart.
     thread::Builder::new()
         .name("hotkey".into())
-        .spawn(move || hotkey_loop(initial, tx, stop))?;
+        .spawn(move || hotkey_loop(initial, proxy, stop))?;
     Ok(())
 }
 
-fn hotkey_loop(initial: Settings, tx: Sender<HkEvent>, stop: Arc<AtomicBool>) {
+fn spawn_tick_thread(proxy: EventLoopProxy<UserEvent>) {
+    // Tick the event loop every 100 ms so periodic tasks (tray menu poll,
+    // staged engine, settings reload, transcribe-done flag) get serviced
+    // even when no input is happening.
+    thread::Builder::new()
+        .name("tick".into())
+        .spawn(move || loop {
+            thread::sleep(Duration::from_millis(100));
+            if proxy.send_event(UserEvent::Tick).is_err() {
+                break;
+            }
+        })
+        .ok();
+}
+
+fn hotkey_loop(initial: Settings, proxy: EventLoopProxy<UserEvent>, stop: Arc<AtomicBool>) {
     let mut settings = initial;
     let mut mgr = match hotkey::HotkeyManager::register(&settings) {
         Ok(m) => Some(m),
@@ -99,31 +133,18 @@ fn hotkey_loop(initial: Settings, tx: Sender<HkEvent>, stop: Arc<AtomicBool>) {
     while !stop.load(Ordering::Relaxed) {
         if let Some(m) = mgr.as_ref() {
             if let Some(ev) = hotkey::poll_state(m, &mut pressed) {
-                let _ = tx.send(match ev {
-                    hotkey::Event::Press => HkEvent::Press,
-                    hotkey::Event::Release => HkEvent::Release,
-                });
-            }
-        } else {
-            // Even without RegisterHotKey we can still drive press/release
-            // from raw GetAsyncKeyState.
-            let dummy = match hotkey::HotkeyManager::register(&settings) {
-                Ok(m) => Some(m),
-                Err(_) => None,
-            };
-            if let Some(m) = dummy.as_ref() {
-                if let Some(ev) = hotkey::poll_state(m, &mut pressed) {
-                    let _ = tx.send(match ev {
-                        hotkey::Event::Press => HkEvent::Press,
-                        hotkey::Event::Release => HkEvent::Release,
-                    });
+                let user_ev = match ev {
+                    hotkey::Event::Press => UserEvent::HotkeyPress,
+                    hotkey::Event::Release => UserEvent::HotkeyRelease,
+                };
+                if proxy.send_event(user_ev).is_err() {
+                    break;
                 }
-                mgr = dummy;
             }
         }
 
-        // Every 500 ms, check whether settings.json changed and re-register
-        // the hotkey if the combo changed.
+        // Every 500 ms: re-read settings.json and re-register the hotkey
+        // if the combo changed (live config reload, no restart needed).
         if last_check.elapsed() >= Duration::from_millis(500) {
             last_check = Instant::now();
             let new = Settings::load();
@@ -135,7 +156,7 @@ fn hotkey_loop(initial: Settings, tx: Sender<HkEvent>, stop: Arc<AtomicBool>) {
                     settings.hotkey_modifiers, settings.hotkey_trigger,
                     new.hotkey_modifiers, new.hotkey_trigger
                 );
-                drop(mgr.take());      // unregister old
+                drop(mgr.take());
                 pressed = false;
                 match hotkey::HotkeyManager::register(&new) {
                     Ok(m) => mgr = Some(m),
@@ -176,14 +197,33 @@ impl AppHandler {
 static STAGED_ENGINE: parking_lot::Mutex<Option<Arc<dyn asr::Engine>>> =
     parking_lot::Mutex::new(None);
 
-impl ApplicationHandler for AppHandler {
+impl ApplicationHandler<UserEvent> for AppHandler {
     fn resumed(&mut self, _el: &ActiveEventLoop) {
         info!("event loop ready");
     }
 
     fn window_event(&mut self, _el: &ActiveEventLoop, _id: WindowId, _ev: WindowEvent) {}
 
+    fn user_event(&mut self, el: &ActiveEventLoop, ev: UserEvent) {
+        match ev {
+            UserEvent::HotkeyPress => self.on_press(),
+            UserEvent::HotkeyRelease => self.on_release(),
+            UserEvent::TranscribeDone => {
+                self.state.tray.set_color(tray::IconColor::Idle);
+            }
+            UserEvent::Tick => self.tick(el),
+        }
+    }
+
     fn about_to_wait(&mut self, el: &ActiveEventLoop) {
+        // Wait mode: don't sleep here; tick thread + user events wake us.
+        self.tick(el);
+        el.set_control_flow(ControlFlow::Wait);
+    }
+}
+
+impl AppHandler {
+    fn tick(&mut self, el: &ActiveEventLoop) {
         // Engine ready?
         if self.state.engine.is_none() {
             if let Some(e) = STAGED_ENGINE.lock().take() {
@@ -200,20 +240,41 @@ impl ApplicationHandler for AppHandler {
                 return;
             }
             if ev.id == self.state.tray.menu_settings_id {
-                info!("opening settings dialog");
+                info!("opening settings UI subprocess");
+                // CRITICAL: spawn from a background thread. CreateProcessW on
+                // Windows ARM64 (especially with Defender real-time scanning)
+                // can block for several seconds. If we call it from inside the
+                // winit pump, the tray's message queue stalls → app goes
+                // "Not Responding" → hotkey dies. From a worker thread the
+                // main pump keeps draining messages while the child boots.
                 if let Ok(exe) = std::env::current_exe() {
-                    // Spawn detached so we never get blocked by it.
-                    let _ = std::process::Command::new(exe).arg("--settings").spawn();
+                    thread::spawn(move || {
+                        let _ = std::process::Command::new(exe)
+                            .arg("--settings")
+                            .stdin(Stdio::null())
+                            .stdout(Stdio::null())
+                            .stderr(Stdio::null())
+                            .creation_flags(DETACHED_PROCESS | CREATE_NO_WINDOW)
+                            .spawn();
+                    });
                 }
-                RELOAD_AT.lock().replace(Instant::now() + Duration::from_secs(2));
             }
         }
 
-        // Periodic settings reload (engine hot-swap; hotkey reload happens
-        // inside the hotkey thread independently).
-        if let Some(at) = *RELOAD_AT.lock() {
-            if Instant::now() >= at {
-                *RELOAD_AT.lock() = None;
+        // Settings hot-reload: poll settings.json mtime; reload if changed.
+        // (Replaces the old fixed 2-second debounce.)
+        {
+            let path = paths::settings_path();
+            let mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+            let mut last = LAST_SETTINGS_MTIME.lock();
+            let changed = match (*last, mtime) {
+                (Some(a), Some(b)) => a != b,
+                (None, Some(_)) => true,
+                _ => false,
+            };
+            if changed {
+                *last = mtime;
+                drop(last);
                 let new = Settings::load();
                 let old_engine = self.state.settings.engine.clone();
                 self.state.settings = new;
@@ -225,50 +286,46 @@ impl ApplicationHandler for AppHandler {
                 }
             }
         }
-
-        // Drain hotkey events from the background thread.
-        while let Ok(ev) = self.state.hk_rx.try_recv() {
-            match ev {
-                HkEvent::Press => {
-                    if self.state.record_started.is_none() {
-                        self.state.recorder.start();
-                        self.state.tray.set_color(tray::IconColor::Recording);
-                        self.state.record_started = Some(Instant::now());
-                        if self.state.settings.sounds {
-                            sounds::play_start();
-                        }
-                        info!("recording start");
-                    }
-                }
-                HkEvent::Release => {
-                    if let Some(started) = self.state.record_started.take() {
-                        let samples = self.state.recorder.stop();
-                        self.state.tray.set_color(tray::IconColor::Idle);
-                        if self.state.settings.sounds {
-                            sounds::play_stop();
-                        }
-                        let dur = started.elapsed();
-                        let min = self.state.settings.min_record_seconds;
-                        let sr = self.state.recorder.sample_rate;
-                        if dur.as_secs_f32() < min {
-                            info!(secs = dur.as_secs_f32(), "below min — discarded");
-                        } else {
-                            self.dispatch_transcribe(samples, sr);
-                        }
-                    }
-                }
+        // Keep RELOAD_AT path as a no-op safety net (cleared if ever set).
+        if let Some(at) = *RELOAD_AT.lock() {
+            if Instant::now() >= at {
+                *RELOAD_AT.lock() = None;
             }
         }
 
-        // Reset tray colour when a transcription thread signals done.
         if DONE_FLAG.swap(false, Ordering::Relaxed) {
             self.state.tray.set_color(tray::IconColor::Idle);
         }
+    }
 
-        // Small sleep to avoid pegging the CPU — winit's Poll mode would
-        // otherwise spin tight. 16 ms ~= 60 fps which is plenty for tray.
-        thread::sleep(Duration::from_millis(16));
-        el.set_control_flow(ControlFlow::Poll);
+    fn on_press(&mut self) {
+        if self.state.record_started.is_none() {
+            self.state.recorder.start();
+            self.state.tray.set_color(tray::IconColor::Recording);
+            self.state.record_started = Some(Instant::now());
+            if self.state.settings.sounds {
+                sounds::play_start();
+            }
+            info!("recording start");
+        }
+    }
+
+    fn on_release(&mut self) {
+        if let Some(started) = self.state.record_started.take() {
+            let samples = self.state.recorder.stop();
+            self.state.tray.set_color(tray::IconColor::Idle);
+            if self.state.settings.sounds {
+                sounds::play_stop();
+            }
+            let dur = started.elapsed();
+            let min = self.state.settings.min_record_seconds;
+            let sr = self.state.recorder.sample_rate;
+            if dur.as_secs_f32() < min {
+                info!(secs = dur.as_secs_f32(), "below min — discarded");
+            } else {
+                self.dispatch_transcribe(samples, sr);
+            }
+        }
     }
 }
 
@@ -317,6 +374,7 @@ impl AppHandler {
 
 static DONE_FLAG: AtomicBool = AtomicBool::new(false);
 static RELOAD_AT: parking_lot::Mutex<Option<Instant>> = parking_lot::Mutex::new(None);
+static LAST_SETTINGS_MTIME: parking_lot::Mutex<Option<std::time::SystemTime>> = parking_lot::Mutex::new(None);
 
 fn paste(text: &str) {
     let mut clip = match Clipboard::new() {
