@@ -30,7 +30,7 @@ use winit::window::WindowId;
 #[derive(Debug, Clone, Copy)]
 pub enum UserEvent {
     HotkeyPress,
-    HotkeyRelease,
+    HotkeyRelease { enhance: bool },
     TranscribeDone,
     Tick,
 }
@@ -120,31 +120,45 @@ fn spawn_tick_thread(proxy: EventLoopProxy<UserEvent>) {
 
 fn hotkey_loop(initial: Settings, proxy: EventLoopProxy<UserEvent>, stop: Arc<AtomicBool>) {
     let mut settings = initial;
-    let mut mgr = match hotkey::HotkeyManager::register(&settings) {
+    // Try OS-level registration so other apps know the combo is taken.
+    // If that fails (e.g. Windows already reserved it), fall through to
+    // pure GetAsyncKeyState polling — that always works regardless of
+    // whether RegisterHotKey accepted us.
+    let mut _mgr: Option<hotkey::HotkeyManager> = match hotkey::HotkeyManager::register(&settings) {
         Ok(m) => Some(m),
         Err(e) => {
-            warn!(error = %e, "hotkey register failed; polling without OS reservation");
+            warn!(error = %e, "RegisterHotKey failed; using key-state polling only");
             None
         }
     };
+    // Track combo vk codes manually so polling works without a HotkeyManager.
+    let mut trigger_vk = hotkey::trigger_vk_for(&settings.hotkey_trigger);
+    let mut mod_vks: Vec<u32> = settings
+        .hotkey_modifiers
+        .iter()
+        .map(|m| hotkey::mod_vk_for(m))
+        .collect();
     let mut pressed = false;
     let mut last_check = Instant::now();
 
     while !stop.load(Ordering::Relaxed) {
-        if let Some(m) = mgr.as_ref() {
-            if let Some(ev) = hotkey::poll_state(m, &mut pressed) {
-                let user_ev = match ev {
-                    hotkey::Event::Press => UserEvent::HotkeyPress,
-                    hotkey::Event::Release => UserEvent::HotkeyRelease,
-                };
-                if proxy.send_event(user_ev).is_err() {
-                    break;
+        if let Some(ev) = hotkey::poll_combo(trigger_vk, &mod_vks, &mut pressed) {
+            let user_ev = match ev {
+                hotkey::Event::Press => UserEvent::HotkeyPress,
+                hotkey::Event::Release => {
+                    let shift_is_modifier = settings
+                        .hotkey_modifiers
+                        .iter()
+                        .any(|m| m == "shift");
+                    let enhance = !shift_is_modifier && shift_currently_down();
+                    UserEvent::HotkeyRelease { enhance }
                 }
+            };
+            if proxy.send_event(user_ev).is_err() {
+                break;
             }
         }
 
-        // Every 500 ms: re-read settings.json and re-register the hotkey
-        // if the combo changed (live config reload, no restart needed).
         if last_check.elapsed() >= Duration::from_millis(500) {
             last_check = Instant::now();
             let new = Settings::load();
@@ -156,12 +170,11 @@ fn hotkey_loop(initial: Settings, proxy: EventLoopProxy<UserEvent>, stop: Arc<At
                     settings.hotkey_modifiers, settings.hotkey_trigger,
                     new.hotkey_modifiers, new.hotkey_trigger
                 );
-                drop(mgr.take());
+                drop(_mgr.take());
                 pressed = false;
-                match hotkey::HotkeyManager::register(&new) {
-                    Ok(m) => mgr = Some(m),
-                    Err(e) => warn!(error = %e, "re-register failed"),
-                }
+                _mgr = hotkey::HotkeyManager::register(&new).ok();
+                trigger_vk = hotkey::trigger_vk_for(&new.hotkey_trigger);
+                mod_vks = new.hotkey_modifiers.iter().map(|m| hotkey::mod_vk_for(m)).collect();
             }
             settings = new;
         }
@@ -207,7 +220,7 @@ impl ApplicationHandler<UserEvent> for AppHandler {
     fn user_event(&mut self, el: &ActiveEventLoop, ev: UserEvent) {
         match ev {
             UserEvent::HotkeyPress => self.on_press(),
-            UserEvent::HotkeyRelease => self.on_release(),
+            UserEvent::HotkeyRelease { enhance } => self.on_release(enhance),
             UserEvent::TranscribeDone => {
                 self.state.tray.set_color(tray::IconColor::Idle);
             }
@@ -310,7 +323,7 @@ impl AppHandler {
         }
     }
 
-    fn on_release(&mut self) {
+    fn on_release(&mut self, enhance: bool) {
         if let Some(started) = self.state.record_started.take() {
             let samples = self.state.recorder.stop();
             self.state.tray.set_color(tray::IconColor::Idle);
@@ -323,14 +336,19 @@ impl AppHandler {
             if dur.as_secs_f32() < min {
                 info!(secs = dur.as_secs_f32(), "below min — discarded");
             } else {
-                self.dispatch_transcribe(samples, sr);
+                self.dispatch_transcribe(samples, sr, enhance);
             }
         }
     }
 }
 
+fn shift_currently_down() -> bool {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_SHIFT};
+    unsafe { (GetAsyncKeyState(VK_SHIFT.0 as i32) as u32) & 0x8000 != 0 }
+}
+
 impl AppHandler {
-    fn dispatch_transcribe(&mut self, samples: Vec<f32>, sr: u32) {
+    fn dispatch_transcribe(&mut self, samples: Vec<f32>, sr: u32, enhance_requested: bool) {
         let Some(engine) = self.state.engine.clone() else {
             warn!("engine not yet ready, discarding {} samples", samples.len());
             return;
@@ -351,7 +369,10 @@ impl AppHandler {
                 DONE_FLAG.store(true, Ordering::Relaxed);
                 return;
             }
-            let final_text = if settings.enhance.provider != "off" {
+            // Enhance only when the user explicitly requested it by holding
+            // Shift at release time AND a provider is configured.
+            let final_text = if enhance_requested && settings.enhance.provider != "off" {
+                info!("enhance requested (shift held)");
                 match enhance::enhance(&text, &settings) {
                     Ok(t) if !t.trim().is_empty() => t,
                     Ok(_) => text,

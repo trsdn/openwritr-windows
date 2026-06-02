@@ -40,7 +40,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             hotkey_modifiers: vec!["ctrl".into(), "win".into()],
-            hotkey_trigger: "space".into(),
+            hotkey_trigger: "none".into(),
             engine: "parakeet_cpu".into(),
             auto_paste: true,
             overlay: true,

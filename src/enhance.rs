@@ -4,8 +4,9 @@
 
 use crate::settings::{Enhance, Settings};
 use anyhow::{anyhow, Result};
+use parking_lot::Mutex;
 use serde_json::json;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tracing::warn;
 
 const SYSTEM: &str = "You are a transcription cleanup assistant. Fix \
@@ -72,8 +73,21 @@ pub fn enhance(text: &str, settings: &Settings) -> Result<String> {
 }
 
 fn gh_token() -> Option<String> {
+    // Cache the token for 10 minutes so we don't spawn `gh` on every call.
+    static CACHE: Mutex<Option<(String, Instant)>> = Mutex::new(None);
+    {
+        let g = CACHE.lock();
+        if let Some((tok, t)) = g.as_ref() {
+            if t.elapsed() < Duration::from_secs(600) {
+                return Some(tok.clone());
+            }
+        }
+    }
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let out = std::process::Command::new("gh")
         .args(["auth", "token"])
+        .creation_flags(CREATE_NO_WINDOW)
         .output()
         .ok()?;
     if !out.status.success() {
@@ -81,5 +95,7 @@ fn gh_token() -> Option<String> {
         return None;
     }
     let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if s.is_empty() { None } else { Some(s) }
+    if s.is_empty() { return None; }
+    *CACHE.lock() = Some((s.clone(), Instant::now()));
+    Some(s)
 }

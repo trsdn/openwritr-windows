@@ -90,6 +90,7 @@ impl eframe::App for SettingsApp {
                 ui.add_space(6.0);
                 ui.label("Trigger key (hold + release)");
                 let triggers = [
+                    "none",
                     "space","tab","caps_lock","scroll_lock","pause","insert","right_ctrl",
                     "f13","f14","f15","f16","f17","f18","f19","f20",
                 ];
@@ -104,8 +105,8 @@ impl eframe::App for SettingsApp {
                     });
                 ui.add_space(4.0);
                 ui.label(egui::RichText::new(
-                    "Hold modifiers + trigger to record; release any to stop. \
-                     Add Alt to trigger LLM cleanup."
+                    "Hold modifiers (+ trigger) to record; release any to stop. \
+                     Hold Shift additionally to also run LLM cleanup."
                 ).small().color(egui::Color32::from_rgb(154, 163, 178)));
             });
 
@@ -137,7 +138,7 @@ impl eframe::App for SettingsApp {
             // Enhance
             section(ui, "ENHANCE (PUNCTUATION + CLEANUP)", |ui| {
                 ui.label(egui::RichText::new(
-                    "Hold the hotkey with Alt also pressed to trigger an LLM cleanup pass after transcription."
+                    "Hold the hotkey with Shift also pressed to trigger an LLM cleanup pass after transcription."
                 ).small().color(egui::Color32::from_rgb(154, 163, 178)));
                 ui.add_space(6.0);
                 let providers = [
@@ -222,6 +223,7 @@ fn section(ui: &mut egui::Ui, title: &str, body: impl FnOnce(&mut egui::Ui)) {
 
 fn label_for_trigger(t: &str) -> String {
     match t {
+        "none" => "None (modifiers only)".into(),
         "space" => "Space".into(),
         "tab" => "Tab".into(),
         "caps_lock" => "Caps Lock".into(),
