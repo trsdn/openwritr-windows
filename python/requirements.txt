@@ -1,8 +1,0 @@
-numpy>=1.26
-onnxruntime==1.24.4
-onnx-asr>=0.11
-sounddevice>=0.5
-pynput>=1.8
-pystray>=0.19
-pillow>=10
-pyperclip>=1.9
