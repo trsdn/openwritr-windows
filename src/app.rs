@@ -1,6 +1,6 @@
 //! App orchestration: tray + winit event loop + hotkey polling + ASR.
 
-use crate::{asr, audio::Recorder, hotkey, settings::Settings, tray};
+use crate::{asr, audio::Recorder, enhance, hotkey, settings::Settings, sounds, tray};
 use anyhow::Result;
 use arboard::Clipboard;
 use enigo::{Direction, Enigo, Key, Keyboard, Settings as EnigoSettings};
@@ -110,7 +110,28 @@ impl ApplicationHandler for AppHandler {
                 return;
             }
             if ev.id == self.state.tray.menu_settings_id {
-                info!("settings clicked (UI not implemented in v0.2 skeleton)");
+                info!("opening settings dialog");
+                if let Ok(exe) = std::env::current_exe() {
+                    let _ = std::process::Command::new(exe).arg("--settings").spawn();
+                }
+                // Reload settings shortly after.
+                RELOAD_AT.lock().replace(Instant::now() + Duration::from_secs(2));
+            }
+        }
+
+        // Periodically reload settings file mtime — picks up subprocess writes.
+        if let Some(at) = *RELOAD_AT.lock() {
+            if Instant::now() >= at {
+                *RELOAD_AT.lock() = None;
+                let new = Settings::load();
+                let old_engine = self.state.settings.engine.clone();
+                self.state.settings = new;
+                let new_engine = self.state.settings.engine.clone();
+                if new_engine != old_engine {
+                    info!("engine changed: {old_engine} -> {new_engine}; reloading");
+                    self.state.engine = None;
+                    self.start_engine_load();
+                }
             }
         }
 
@@ -122,6 +143,9 @@ impl ApplicationHandler for AppHandler {
                         self.state.recorder.start();
                         self.state.tray.set_color(tray::IconColor::Recording);
                         self.state.record_started = Some(Instant::now());
+                        if self.state.settings.sounds {
+                            sounds::play_start();
+                        }
                         info!("recording start");
                     }
                 }
@@ -129,6 +153,9 @@ impl ApplicationHandler for AppHandler {
                     if let Some(started) = self.state.record_started.take() {
                         let samples = self.state.recorder.stop();
                         self.state.tray.set_color(tray::IconColor::Idle);
+                        if self.state.settings.sounds {
+                            sounds::play_stop();
+                        }
                         let dur = started.elapsed();
                         let min = self.state.settings.min_record_seconds;
                         let sr = self.state.recorder.sample_rate;
@@ -155,28 +182,44 @@ impl AppHandler {
         };
         self.state.tray.set_color(tray::IconColor::Transcribing);
         let auto_paste = self.state.settings.auto_paste;
+        let settings = self.state.settings.clone();
         thread::spawn(move || {
             let text = match engine.transcribe(&samples, sr) {
                 Ok(t) => t,
                 Err(e) => {
                     warn!(error = %e, "transcription failed");
+                    DONE_FLAG.store(true, Ordering::Relaxed);
                     return;
                 }
             };
             if text.is_empty() {
+                DONE_FLAG.store(true, Ordering::Relaxed);
                 return;
             }
-            info!(chars = text.len(), "transcript ready");
+            // Optional LLM cleanup.
+            let final_text = if settings.enhance.provider != "off" {
+                match enhance::enhance(&text, &settings) {
+                    Ok(t) if !t.trim().is_empty() => t,
+                    Ok(_) => text,
+                    Err(e) => {
+                        warn!(error = %e, "enhance failed; using raw transcript");
+                        text
+                    }
+                }
+            } else {
+                text
+            };
+            info!(chars = final_text.len(), "transcript ready");
             if auto_paste {
-                paste(&text);
+                paste(&final_text);
             }
-            // Tell the main thread we're done so it can flip the tray back.
             DONE_FLAG.store(true, Ordering::Relaxed);
         });
     }
 }
 
 static DONE_FLAG: AtomicBool = AtomicBool::new(false);
+static RELOAD_AT: parking_lot::Mutex<Option<Instant>> = parking_lot::Mutex::new(None);
 
 fn paste(text: &str) {
     // Save & restore clipboard around the synthesized Ctrl+V.

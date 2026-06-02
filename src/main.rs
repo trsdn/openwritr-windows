@@ -6,9 +6,12 @@ mod app;
 mod asr;
 mod audio;
 mod download;
+mod enhance;
 mod hotkey;
 mod paths;
 mod settings;
+mod settings_ui;
+mod sounds;
 mod tray;
 
 use anyhow::Result;
@@ -16,6 +19,13 @@ use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 fn main() -> Result<()> {
+    // If invoked with `--settings`, render the egui settings dialog and exit.
+    if std::env::args().any(|a| a == "--settings") {
+        init_tracing();
+        info!("opening settings UI subprocess");
+        return settings_ui::run_dialog();
+    }
+
     init_tracing();
     info!("OpenWritr native v{} starting", env!("CARGO_PKG_VERSION"));
     app::run()

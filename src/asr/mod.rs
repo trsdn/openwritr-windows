@@ -10,8 +10,9 @@ mod parakeet;
 mod resample;
 mod tokenizer;
 mod tdt;
+mod whisper_npu;
 
-pub use parakeet::ParakeetCpu;
+pub use parakeet::ParakeetEngine;
 
 pub trait Engine: Send + Sync {
     fn transcribe(&self, samples: &[f32], sample_rate: u32) -> Result<String>;
@@ -20,10 +21,20 @@ pub trait Engine: Send + Sync {
 
 pub fn load(name: &str) -> Result<Box<dyn Engine>> {
     match name {
-        "parakeet_cpu" | "parakeet_npu" | "whisper_npu" => Ok(Box::new(ParakeetCpu::load()?)),
-        other => {
-            tracing::warn!("unknown engine '{other}', using parakeet_cpu");
-            Ok(Box::new(ParakeetCpu::load()?))
-        }
+        "parakeet_npu" => match ParakeetEngine::load_npu() {
+            Ok(e) => Ok(Box::new(e)),
+            Err(e) => {
+                tracing::warn!(error = %e, "Parakeet NPU load failed — using CPU");
+                Ok(Box::new(ParakeetEngine::load_cpu()?))
+            }
+        },
+        "whisper_npu" => match whisper_npu::WhisperNpuEngine::load() {
+            Ok(e) => Ok(Box::new(e)),
+            Err(e) => {
+                tracing::warn!(error = %e, "Whisper NPU unavailable — using Parakeet CPU");
+                Ok(Box::new(ParakeetEngine::load_cpu()?))
+            }
+        },
+        _ => Ok(Box::new(ParakeetEngine::load_cpu()?)),
     }
 }

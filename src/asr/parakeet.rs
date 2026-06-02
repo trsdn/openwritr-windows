@@ -1,15 +1,9 @@
-//! Parakeet TDT 0.6B v3 CPU INT8 — Rust port of the onnx-asr nemo adapter.
+//! Parakeet TDT 0.6B v3 — CPU INT8 backend.
 //!
-//! Pipeline per utterance:
-//!   1. resample input audio to 16 kHz mono (rubato)
-//!   2. run nemo128.onnx ONNX preprocessor -> (B, n_mels, T) features
-//!   3. run encoder-model.int8.onnx -> (B, D, T') + encoded_lengths
-//!      then transpose to (B, T', D) like onnx-asr does
-//!   4. greedy TDT decode (asr::tdt) over the time axis
-//!   5. detokenize via vocab.txt
-//!
-//! All three onnxruntime sessions are reused across calls. CPU EP only —
-//! NPU comes in a follow-up commit.
+//! NPU support is wired in `parakeet_npu` mode but the QNN execution
+//! provider plumbing through ort 2.0-rc.10 + load-dynamic falls back to
+//! CPU silently. We log a clear warning so users know they're getting
+//! the CPU path until ort matures the EP-library registration API.
 
 use super::{resample, tokenizer::Vocab};
 use super::tdt::Tdt;
@@ -21,18 +15,18 @@ use ort::execution_providers::CPUExecutionProvider;
 use ort::session::{builder::GraphOptimizationLevel, Session};
 use ort::value::Value;
 use parking_lot::Mutex;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Once;
 use std::time::Instant;
-use tracing::info;
+use tracing::{info, warn};
 
 static ORT_INIT: Once = Once::new();
+
+pub const MAX_NPU_SECONDS: f32 = 28.0;
 
 fn init_ort_once() -> Result<()> {
     let mut err = None;
     ORT_INIT.call_once(|| {
-        // load-dynamic build — try to find onnxruntime.dll next to the exe
-        // first, then fall back to whatever is on PATH.
         if let Ok(exe) = std::env::current_exe() {
             if let Some(dir) = exe.parent() {
                 let local = dir.join("onnxruntime.dll");
@@ -55,8 +49,14 @@ fn init_ort_once() -> Result<()> {
     Ok(())
 }
 
-pub struct ParakeetCpu {
-    model_dir: PathBuf,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Backend {
+    Cpu,
+    Npu,
+}
+
+pub struct ParakeetEngine {
+    backend: Backend,
     encoder: Mutex<Session>,
     decoder_joint: Mutex<Session>,
     preprocessor: Mutex<Session>,
@@ -64,41 +64,45 @@ pub struct ParakeetCpu {
     tdt: Tdt,
 }
 
-impl ParakeetCpu {
-    pub fn load() -> Result<Self> {
+impl ParakeetEngine {
+    pub fn load_cpu() -> Result<Self> {
         init_ort_once()?;
         let dir = download::ensure_parakeet_cpu_int8()
             .context("download parakeet cpu int8")?;
-        info!("loading Parakeet CPU INT8 from {}", dir.display());
+        Self::load_from(dir, Backend::Cpu)
+    }
+
+    pub fn load_npu() -> Result<Self> {
+        warn!(
+            "NPU backend not yet plumbed through native ort — \
+             falling back to CPU INT8. Use the Python v0.1 app for true NPU support."
+        );
+        Self::load_cpu()
+    }
+
+    fn load_from(dir: PathBuf, backend: Backend) -> Result<Self> {
+        info!("loading Parakeet {:?} from {}", backend, dir.display());
         let t0 = Instant::now();
 
-        let make = |name: &str| -> Result<Session> {
-            let path = dir.join(name);
-            Session::builder()?
-                .with_optimization_level(GraphOptimizationLevel::Level3)?
-                .with_intra_threads(num_threads())?
-                .commit_from_file(&path)
-                .with_context(|| format!("load {}", path.display()))
-        };
+        let preprocessor = build_cpu_session(&dir.join("nemo128.onnx"))?;
+        let encoder = build_cpu_session(&dir.join("encoder-model.int8.onnx"))?;
+        let decoder_joint = build_cpu_session(&dir.join("decoder_joint-model.int8.onnx"))?;
 
-        let preprocessor = make("nemo128.onnx")?;
-        let encoder = make("encoder-model.int8.onnx")?;
-        let decoder_joint = make("decoder_joint-model.int8.onnx")?;
         let vocab = Vocab::load(&dir.join("vocab.txt"))?;
         info!(
             secs = t0.elapsed().as_secs_f32(),
             vocab = vocab.size,
             blank = vocab.blank_id,
-            "Parakeet CPU ready"
+            "Parakeet ready"
         );
 
         let tdt = Tdt {
-            vocab_size: vocab.size,  // include blank — joint output is [vocab + durations]
+            vocab_size: vocab.size,
             blank_id: vocab.blank_id,
         };
 
         Ok(Self {
-            model_dir: dir,
+            backend,
             encoder: Mutex::new(encoder),
             decoder_joint: Mutex::new(decoder_joint),
             preprocessor: Mutex::new(preprocessor),
@@ -108,8 +112,13 @@ impl ParakeetCpu {
     }
 }
 
-impl Engine for ParakeetCpu {
-    fn label(&self) -> &'static str { "Parakeet TDT v3 (CPU INT8)" }
+impl Engine for ParakeetEngine {
+    fn label(&self) -> &'static str {
+        match self.backend {
+            Backend::Cpu => "Parakeet TDT v3 (CPU INT8)",
+            Backend::Npu => "Parakeet TDT v3 (CPU INT8 — NPU pending)",
+        }
+    }
 
     fn transcribe(&self, samples: &[f32], sample_rate: u32) -> Result<String> {
         if samples.is_empty() {
@@ -120,10 +129,21 @@ impl Engine for ParakeetCpu {
         if pcm.is_empty() {
             return Ok(String::new());
         }
+        let text = self.run_pipeline(&pcm)?;
+        info!(
+            audio_s = samples.len() as f32 / sample_rate as f32,
+            decode_ms = t_total.elapsed().as_millis() as u64,
+            backend = ?self.backend,
+            "transcribed -> {text:?}"
+        );
+        Ok(text)
+    }
+}
 
-        // 1) Preprocessor: waveforms (1, N) + waveforms_lens (1) -> features (1, n_mels, T), lens.
-        let n = pcm.len();
-        let wave = ndarray::Array2::from_shape_vec((1, n), pcm)?;
+impl ParakeetEngine {
+    fn run_pipeline(&self, pcm_16k: &[f32]) -> Result<String> {
+        let n = pcm_16k.len();
+        let wave = ndarray::Array2::from_shape_vec((1, n), pcm_16k.to_vec())?;
         let wave_len = Array1::<i64>::from_elem(1, n as i64);
 
         let pre_in = ort::inputs![
@@ -149,7 +169,6 @@ impl Engine for ParakeetCpu {
             (features, features_lens)
         };
 
-        // 2) Encoder.
         let enc_in = ort::inputs![
             "audio_signal" => Value::from_array(features.into_dyn())?,
             "length" => Value::from_array(features_lens.into_dyn())?,
@@ -173,8 +192,6 @@ impl Engine for ParakeetCpu {
             (encoder_out, encoder_lens)
         };
 
-        // istupakov returns (B, D, T'); we transpose to (B, T', D) so TDT
-        // can index time on axis 1.
         let encoder_out_owned = encoder_out
             .permuted_axes([0, 2, 1])
             .as_standard_layout()
@@ -191,17 +208,16 @@ impl Engine for ParakeetCpu {
             let mut dec = self.decoder_joint.lock();
             self.tdt.decode(&mut dec, &encoder_out_owned, t_out)?
         };
-        let text = self.vocab.detokenize(&token_ids);
-
-        info!(
-            audio_s = samples.len() as f32 / sample_rate as f32,
-            decode_ms = t_total.elapsed().as_millis() as u64,
-            tokens = token_ids.len(),
-            "transcribed -> {text:?}"
-        );
-        let _ = self.model_dir;
-        Ok(text)
+        Ok(self.vocab.detokenize(&token_ids))
     }
+}
+
+fn build_cpu_session(path: &Path) -> Result<Session> {
+    Session::builder()?
+        .with_optimization_level(GraphOptimizationLevel::Level3)?
+        .with_intra_threads(num_threads())?
+        .commit_from_file(path)
+        .with_context(|| format!("load {}", path.display()))
 }
 
 fn num_threads() -> usize {

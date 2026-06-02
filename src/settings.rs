@@ -63,12 +63,17 @@ impl Settings {
         }
     }
 
+    pub fn save_to(&self, path: &std::path::Path) {
+        if let Some(p) = path.parent() {
+            fs::create_dir_all(p).ok();
+        }
+        if let Ok(s) = serde_json::to_string_pretty(self) {
+            fs::write(path, s).ok();
+        }
+    }
+
     #[allow(dead_code)]
     pub fn save(&self) {
-        let path = settings_path();
-        if let Some(p) = path.parent() { fs::create_dir_all(p).ok(); }
-        if let Ok(s) = serde_json::to_string_pretty(self) {
-            fs::write(&path, s).ok();
-        }
+        self.save_to(&settings_path());
     }
 }
