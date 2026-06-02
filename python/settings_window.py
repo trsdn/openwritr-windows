@@ -20,6 +20,7 @@ SETTINGS_PATH = APPDATA / "settings.json"
 
 DEFAULTS = {
     "hotkey_modifiers": ["ctrl", "win"],
+    "engine": "parakeet_cpu",
     "auto_paste": True,
     "overlay": True,
     "sounds": True,
@@ -256,6 +257,19 @@ XAML = r"""<Window
 
       <Border Style="{StaticResource Section}">
         <StackPanel>
+          <TextBlock Style="{StaticResource SectionTitle}" Text="TRANSCRIPTION ENGINE"/>
+          <TextBlock Style="{StaticResource Hint}" Margin="0,0,0,4"
+                     Text="NPU options run on the Hexagon accelerator: faster and lower power. Falls back to CPU if the model file is missing."/>
+          <ComboBox x:Name="EngineCombo" SelectedIndex="0">
+            <ComboBoxItem Content="Parakeet TDT v3 — CPU INT8 (default, 25 languages)" Tag="parakeet_cpu"/>
+            <ComboBoxItem Content="Parakeet TDT v3 — NPU INT8 (Hexagon, ~1.5x faster)" Tag="parakeet_npu"/>
+            <ComboBoxItem Content="Whisper Large v3 Turbo — NPU (99 languages)" Tag="whisper_npu"/>
+          </ComboBox>
+        </StackPanel>
+      </Border>
+
+      <Border Style="{StaticResource Section}">
+        <StackPanel>
           <TextBlock Style="{StaticResource SectionTitle}" Text="BEHAVIOUR"/>
           <Grid Margin="0,4">
             <Grid.ColumnDefinitions>
@@ -393,6 +407,14 @@ def _run_window() -> int:
     find("ApiKey").Password = enh.get("api_key", "")
     find("Model").Text = enh.get("model", "gpt-4o-mini") or "gpt-4o-mini"
 
+    # Engine combo.
+    engine_value = settings.get("engine", "parakeet_cpu")
+    ec = find("EngineCombo")
+    for i in range(ec.Items.Count):
+        if str(ec.Items[i].Tag) == engine_value:
+            ec.SelectedIndex = i
+            break
+
     def on_save(sender, args):
         mods = []
         if find("ModCtrl").IsChecked:  mods.append("ctrl")
@@ -403,8 +425,11 @@ def _run_window() -> int:
             mods = ["ctrl", "shift"]
         item = find("Provider").SelectedItem
         provider_tag = str(item.Tag) if item is not None else "off"
+        eitem = find("EngineCombo").SelectedItem
+        engine_tag = str(eitem.Tag) if eitem is not None else "parakeet_cpu"
         payload = {
             "hotkey_modifiers": mods,
+            "engine": engine_tag,
             "auto_paste": bool(find("AutoPaste").IsChecked),
             "overlay": bool(find("OverlayOn").IsChecked),
             "sounds": bool(find("SoundsOn").IsChecked),

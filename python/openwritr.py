@@ -16,8 +16,8 @@ from pynput import keyboard
 import pyperclip
 from PIL import Image, ImageDraw
 import pystray
-import onnx_asr
 
+from engine import load_engine, AVAILABLE as ENGINES
 from overlay import Overlay, enable_dpi_awareness
 from settings_launcher import SettingsLauncher
 import sounds
@@ -25,7 +25,7 @@ import enhance as enhance_mod
 
 APP_NAME = "OpenWritr"
 APPDATA = Path(os.environ.get("LOCALAPPDATA", Path.home())) / APP_NAME
-MODEL_DIR = APPDATA / "models" / "parakeet-tdt-0.6b-v3"
+MODEL_DIR = APPDATA / "models" / "parakeet-tdt-0.6b-v3"  # legacy alias
 LOG_DIR = APPDATA / "logs"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 SETTINGS_PATH = APPDATA / "settings.json"
@@ -118,24 +118,17 @@ class AudioRecorder:
 
 # ---------- ASR ----------
 class Transcriber:
-    def __init__(self, model_dir: Path) -> None:
-        log.info("loading Parakeet TDT v3 from %s", model_dir)
-        t0 = time.time()
-        self.model = onnx_asr.load_model(
-            "nemo-parakeet-tdt-0.6b-v3", str(model_dir), quantization="int8"
-        )
-        log.info("model ready in %.2fs", time.time() - t0)
+    def __init__(self, engine_name: str) -> None:
+        log.info("loading engine: %s", engine_name)
+        self._engine = load_engine(engine_name)
+        self._engine_name = engine_name
+
+    @property
+    def engine_name(self) -> str:
+        return self._engine_name
 
     def transcribe(self, audio: np.ndarray) -> str:
-        if audio.size == 0:
-            return ""
-        if audio.dtype != np.float32:
-            audio = audio.astype(np.float32)
-        t0 = time.time()
-        text = self.model.recognize(audio)
-        log.info("transcribed %.1fs audio in %.2fs -> %r",
-                 len(audio) / SAMPLE_RATE, time.time() - t0, text)
-        return text.strip() if isinstance(text, str) else ""
+        return self._engine.transcribe(audio)
 
 
 # ---------- Paste ----------
@@ -293,6 +286,7 @@ class TrayController:
             APP_NAME, make_tray_icon("idle"), APP_NAME,
             menu=pystray.Menu(
                 pystray.MenuItem(lambda _: f"Hotkey: {self._hotkey_label()}", None, enabled=False),
+                pystray.MenuItem(lambda _: f"Engine: {self._engine_label()}", None, enabled=False),
                 pystray.MenuItem(lambda _: f"Enhance: {self._enhance_label()}", None, enabled=False),
                 pystray.Menu.SEPARATOR,
                 pystray.MenuItem("Settings…", lambda *_: self.on_open_settings()),
@@ -305,6 +299,12 @@ class TrayController:
     def _hotkey_label(self) -> str:
         mods = "+".join(m.capitalize() for m in self.settings.get("hotkey_modifiers", []))
         return f"{mods}+Space"
+
+    def _engine_label(self) -> str:
+        eid = self.settings.get("engine", "parakeet_cpu")
+        return {"parakeet_cpu": "Parakeet CPU",
+                "parakeet_npu": "Parakeet NPU",
+                "whisper_npu":  "Whisper NPU"}.get(eid, eid)
 
     def _enhance_label(self) -> str:
         prov = (self.settings.get("enhance") or {}).get("provider", "off")
@@ -336,7 +336,7 @@ class TrayController:
 class App:
     def __init__(self) -> None:
         self.settings = load_settings()
-        self.transcriber = Transcriber(MODEL_DIR)
+        self.transcriber = Transcriber(self.settings.get("engine", "parakeet_cpu"))
         self.dpi = enable_dpi_awareness()
         log.info("DPI scale: %.2fx", self.dpi)
         self.root = tk.Tk()
@@ -357,11 +357,21 @@ class App:
 
     def _reload_settings_from_disk(self) -> None:
         new = load_settings()
+        old_engine = self.settings.get("engine", "parakeet_cpu")
         self.settings.clear()
         self.settings.update(new)
         self.tray.refresh_menu()
-        log.info("settings reloaded: hotkey=%s enhance=%s",
+        if new.get("engine") != old_engine:
+            log.info("engine changed: %s -> %s (hot-swapping)", old_engine, new.get("engine"))
+            try:
+                self.transcriber = Transcriber(new.get("engine", "parakeet_cpu"))
+                # Rebind so the in-flight HotkeyEngine instance sees the new transcriber.
+                self.engine.transcriber = self.transcriber
+            except Exception:
+                log.exception("engine swap failed; reverting to previous")
+        log.info("settings reloaded: hotkey=%s engine=%s enhance=%s",
                  "+".join(self.settings["hotkey_modifiers"]),
+                 self.settings.get("engine"),
                  (self.settings.get("enhance") or {}).get("provider"))
 
     def _on_settings_saved(self, new: dict) -> None:
@@ -409,8 +419,9 @@ class App:
 
 
 def main() -> int:
-    if not MODEL_DIR.exists():
-        log.error("Model directory not found: %s", MODEL_DIR)
+    from engine import PARAKEET_CPU_DIR
+    if not PARAKEET_CPU_DIR.exists():
+        log.error("Parakeet base model not found at %s", PARAKEET_CPU_DIR)
         log.error("Run: python python/fetch_model.py")
         return 2
     try:
