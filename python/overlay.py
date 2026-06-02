@@ -130,21 +130,26 @@ def _render_card(state: str, dpi_scale: float, level: float | None = None,
     d.ellipse((bx, by, bx + badge_d, by + badge_d), fill=(*tint, 255))
     _draw_glyph(d, bx + badge_d / 2, by + badge_d / 2, s.glyph, px)
 
-    text_left = bx + badge_d + 14 * px
+    # Compute the area between the badge and the right edge — text/meter
+    # are centered inside it so the card looks balanced.
+    pad_right = 14 * px
+    region_left = bx + badge_d + 10 * px
+    region_right = w - pad_right
+    region_center_x = (region_left + region_right) / 2
+
     if state == "listening":
-        meter_x = text_left
         meter_y = h / 2
         bar_w = 4 * px
         gap = 4 * px
         n = LEVEL_BARS
         max_h = 36 * px
         lvl = max(0.0, min(1.0, level or 0.0))
+        total_w = n * bar_w + (n - 1) * gap
+        meter_x = region_center_x - total_w / 2
         for i in range(n):
-            # Centred bell envelope so middle bars are tallest.
             dist = abs(i - (n - 1) / 2) / ((n - 1) / 2)
             shape = 1.0 - 0.4 * (dist ** 1.5)
             baseline = 0.22 * shape * (0.55 + 0.45 * math.sin(phase * 2 * math.pi + i * 0.55))
-            # Amplify audio: pow < 1 lifts soft sounds; multiplier extends top end.
             audio = (lvl ** 0.65) * 1.25 * shape
             mag = max(baseline, audio)
             bar_h = max(4 * px, min(max_h, mag * max_h))
@@ -153,8 +158,8 @@ def _render_card(state: str, dpi_scale: float, level: float | None = None,
                                 radius=bar_w / 2, fill=(255, 255, 255, 235))
     else:
         font = _load_font(int(15 * px))
-        d.text((text_left, h / 2), s.label, fill=(240, 243, 250, 255),
-               font=font, anchor="lm")
+        d.text((region_center_x, h / 2), s.label, fill=(240, 243, 250, 255),
+               font=font, anchor="mm")
 
     return img.resize((int(CARD_W * dpi_scale), int(CARD_H * dpi_scale)), Image.LANCZOS)
 

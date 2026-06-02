@@ -72,11 +72,17 @@ class ParakeetEngine:
     name = "parakeet_cpu"
     label = "Parakeet TDT v3 (CPU INT8)"
 
+    # The QDQ-quantized HTP encoder was calibrated with audio capped at 30 s
+    # and bakes some shape assumptions; longer inputs trigger Expand-node
+    # errors. Cap conservatively.
+    MAX_NPU_SECONDS = 28
+
     def __init__(self, model_dir: Path, quantization: Optional[str] = "int8",
                  npu: bool = False) -> None:
         import onnx_asr
         self._model_dir = model_dir
         self._npu = npu
+        self._cpu_fallback = None   # lazy
         log.info("loading Parakeet (npu=%s) from %s", npu, model_dir)
         t0 = time.perf_counter()
         if quantization is None:
@@ -128,10 +134,39 @@ class ParakeetEngine:
             return ""
         if audio.dtype != np.float32:
             audio = audio.astype(np.float32)
+        # Cap audio for the NPU path so the QDQ encoder doesn't hit shape
+        # mismatches the calibration set never exercised.
+        if self._npu:
+            max_samples = int(self.MAX_NPU_SECONDS * SAMPLE_RATE)
+            if audio.size > max_samples:
+                log.info("trimming %.1fs -> %.1fs for NPU encoder",
+                         audio.size / SAMPLE_RATE, self.MAX_NPU_SECONDS)
+                audio = audio[:max_samples]
         t0 = time.perf_counter()
-        text = self._model.recognize(audio)
-        log.info("transcribed %.1fs in %.2fs -> %r",
-                 len(audio) / SAMPLE_RATE, time.perf_counter() - t0, text)
+        try:
+            text = self._model.recognize(audio)
+            log.info("transcribed %.1fs in %.2fs -> %r",
+                     len(audio) / SAMPLE_RATE, time.perf_counter() - t0, text)
+            return (text or "").strip()
+        except Exception:
+            if not self._npu:
+                raise
+            log.exception("NPU transcription failed — falling back to CPU once")
+            return self._cpu_transcribe_fallback(audio)
+
+    def _cpu_transcribe_fallback(self, audio: np.ndarray) -> str:
+        if self._cpu_fallback is None:
+            import onnx_asr
+            from pathlib import Path as _P
+            cpu_dir = PARAKEET_CPU_DIR
+            log.info("loading CPU fallback model from %s", cpu_dir)
+            self._cpu_fallback = onnx_asr.load_model(
+                "nemo-parakeet-tdt-0.6b-v3", str(cpu_dir), quantization="int8"
+            )
+        t0 = time.perf_counter()
+        text = self._cpu_fallback.recognize(audio)
+        log.info("CPU fallback transcribed in %.2fs -> %r",
+                 time.perf_counter() - t0, text)
         return (text or "").strip()
 
 
