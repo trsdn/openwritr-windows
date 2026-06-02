@@ -93,7 +93,7 @@ impl ParakeetCpu {
         );
 
         let tdt = Tdt {
-            vocab_size: vocab.size - 1,  // exclude blank from token logits range
+            vocab_size: vocab.size,  // include blank — joint output is [vocab + durations]
             blank_id: vocab.blank_id,
         };
 
