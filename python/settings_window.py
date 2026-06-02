@@ -20,6 +20,7 @@ SETTINGS_PATH = APPDATA / "settings.json"
 
 DEFAULTS = {
     "hotkey_modifiers": ["ctrl", "win"],
+    "hotkey_trigger": "space",
     "engine": "parakeet_cpu",
     "auto_paste": True,
     "overlay": True,
@@ -244,14 +245,33 @@ XAML = r"""<Window
       <Border Style="{StaticResource Section}">
         <StackPanel>
           <TextBlock Style="{StaticResource SectionTitle}" Text="HOTKEY (HOLD TO RECORD)"/>
-          <StackPanel Orientation="Horizontal">
+          <TextBlock Style="{StaticResource FieldLabel}" Text="Modifier keys (any combination)"/>
+          <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
             <ToggleButton x:Name="ModCtrl"  Style="{StaticResource ChipToggle}" Content="Ctrl"/>
             <ToggleButton x:Name="ModShift" Style="{StaticResource ChipToggle}" Content="Shift"/>
             <ToggleButton x:Name="ModAlt"   Style="{StaticResource ChipToggle}" Content="Alt"/>
             <ToggleButton x:Name="ModWin"   Style="{StaticResource ChipToggle}" Content="Win"/>
           </StackPanel>
+          <TextBlock Style="{StaticResource FieldLabel}" Text="Trigger key (hold + release)"/>
+          <ComboBox x:Name="TriggerCombo" SelectedIndex="0">
+            <ComboBoxItem Content="Space" Tag="space"/>
+            <ComboBoxItem Content="Tab" Tag="tab"/>
+            <ComboBoxItem Content="Caps Lock" Tag="caps_lock"/>
+            <ComboBoxItem Content="Scroll Lock" Tag="scroll_lock"/>
+            <ComboBoxItem Content="Pause / Break" Tag="pause"/>
+            <ComboBoxItem Content="Insert" Tag="insert"/>
+            <ComboBoxItem Content="Right Ctrl" Tag="right_ctrl"/>
+            <ComboBoxItem Content="F13" Tag="f13"/>
+            <ComboBoxItem Content="F14" Tag="f14"/>
+            <ComboBoxItem Content="F15" Tag="f15"/>
+            <ComboBoxItem Content="F16" Tag="f16"/>
+            <ComboBoxItem Content="F17" Tag="f17"/>
+            <ComboBoxItem Content="F18" Tag="f18"/>
+            <ComboBoxItem Content="F19" Tag="f19"/>
+            <ComboBoxItem Content="F20" Tag="f20"/>
+          </ComboBox>
           <TextBlock Style="{StaticResource Hint}"
-                     Text="… plus Space (always required). Hold the combo to dictate; release to transcribe."/>
+                     Text="Hold modifiers + trigger to record; release any of them to stop. Picking a trigger you don't normally use (e.g. F13–F20, Pause) makes accidental triggers impossible. Add Alt to the held combo to run an LLM cleanup pass on the transcript."/>
         </StackPanel>
       </Border>
 
@@ -415,6 +435,14 @@ def _run_window() -> int:
             ec.SelectedIndex = i
             break
 
+    # Trigger key combo.
+    trigger_value = (settings.get("hotkey_trigger") or "space").lower()
+    tc = find("TriggerCombo")
+    for i in range(tc.Items.Count):
+        if str(tc.Items[i].Tag) == trigger_value:
+            tc.SelectedIndex = i
+            break
+
     def on_save(sender, args):
         mods = []
         if find("ModCtrl").IsChecked:  mods.append("ctrl")
@@ -427,8 +455,11 @@ def _run_window() -> int:
         provider_tag = str(item.Tag) if item is not None else "off"
         eitem = find("EngineCombo").SelectedItem
         engine_tag = str(eitem.Tag) if eitem is not None else "parakeet_cpu"
+        titem = find("TriggerCombo").SelectedItem
+        trigger_tag = str(titem.Tag) if titem is not None else "space"
         payload = {
             "hotkey_modifiers": mods,
+            "hotkey_trigger": trigger_tag,
             "engine": engine_tag,
             "auto_paste": bool(find("AutoPaste").IsChecked),
             "overlay": bool(find("OverlayOn").IsChecked),

@@ -45,6 +45,8 @@ log = logging.getLogger("openwritr")
 
 DEFAULTS = {
     "hotkey_modifiers": ["ctrl", "win"],
+    "hotkey_trigger": "space",
+    "engine": "parakeet_cpu",
     "auto_paste": True,
     "overlay": True,
     "sounds": True,
@@ -162,7 +164,28 @@ MOD_MAP = {
     "alt": {keyboard.Key.alt, keyboard.Key.alt_l, keyboard.Key.alt_r, keyboard.Key.alt_gr},
     "win": {keyboard.Key.cmd, keyboard.Key.cmd_l, keyboard.Key.cmd_r},
 }
-TRIGGER = keyboard.Key.space
+
+TRIGGER_KEYS = {
+    "space":       keyboard.Key.space,
+    "tab":         keyboard.Key.tab,
+    "caps_lock":   keyboard.Key.caps_lock,
+    "scroll_lock": keyboard.Key.scroll_lock,
+    "pause":       keyboard.Key.pause,
+    "insert":      keyboard.Key.insert,
+    "right_ctrl":  keyboard.Key.ctrl_r,
+    "f13":         keyboard.Key.f13,
+    "f14":         keyboard.Key.f14,
+    "f15":         keyboard.Key.f15,
+    "f16":         keyboard.Key.f16,
+    "f17":         keyboard.Key.f17,
+    "f18":         keyboard.Key.f18,
+    "f19":         keyboard.Key.f19,
+    "f20":         keyboard.Key.f20,
+}
+
+
+def trigger_key_for(name: str):
+    return TRIGGER_KEYS.get((name or "space").lower(), keyboard.Key.space)
 
 
 class HotkeyEngine:
@@ -176,27 +199,49 @@ class HotkeyEngine:
         self._record_started_at = 0.0
         self._enhanced_for_this_press = False
         self._lock = threading.Lock()
+        self._safety_timer: threading.Timer | None = None
 
     def _required_mods(self) -> set[str]:
-        return set(self.settings.get("hotkey_modifiers", ["ctrl", "shift"]))
+        return set(self.settings.get("hotkey_modifiers", ["ctrl", "win"]))
+
+    def _trigger(self):
+        return trigger_key_for(self.settings.get("hotkey_trigger", "space"))
 
     def _mods_ok(self) -> bool:
         return all(self._pressed_mods.get(m, False) for m in self._required_mods())
 
     def _enhance_active(self) -> bool:
-        # Enhanced mode: required mods + Alt pressed (Alt is the discriminator),
-        # unless the user has already configured Alt as a required mod, in which
-        # case Win serves the same role.
         if "alt" not in self._required_mods():
             return self._pressed_mods.get("alt", False)
         return self._pressed_mods.get("win", False)
 
+    def _stop_recording_locked(self) -> None:
+        """Caller holds self._lock. Stop capture + dispatch the transcribe job."""
+        if not self._recording:
+            return
+        if self._safety_timer is not None:
+            self._safety_timer.cancel()
+            self._safety_timer = None
+        self._recording = False
+        dur = time.time() - self._record_started_at
+        audio = self.recorder.stop()
+        if self.settings.get("sounds", True):
+            sounds.play_stop()
+        if dur < float(self.settings.get("min_record_seconds", 0.25)):
+            log.info("recording too short (%.2fs), discarding", dur)
+            self.on_state("idle", None, False)
+            return
+        enhanced = self._enhanced_for_this_press
+        threading.Thread(target=self._run_transcribe, args=(audio, enhanced), daemon=True).start()
+
     def _on_press(self, key):
+        # Track modifier state.
         for name, keys in MOD_MAP.items():
             if key in keys:
                 self._pressed_mods[name] = True
                 return
-        if key == TRIGGER and self._mods_ok():
+        # Trigger key.
+        if key == self._trigger() and self._mods_ok():
             with self._lock:
                 if not self._recording:
                     self._recording = True
@@ -207,30 +252,43 @@ class HotkeyEngine:
                         self.on_state("listening", None, self._enhanced_for_this_press)
                         if self.settings.get("sounds", True):
                             sounds.play_start()
+                        # Safety auto-stop in case we never see the release event.
+                        max_s = float(self.settings.get("max_record_seconds", 60))
+                        self._safety_timer = threading.Timer(max_s, self._safety_stop)
+                        self._safety_timer.daemon = True
+                        self._safety_timer.start()
                         log.info("recording started (enhanced=%s)", self._enhanced_for_this_press)
                     except Exception:
                         log.exception("recorder start failed")
                         self._recording = False
 
     def _on_release(self, key):
+        # Track modifier release.
+        was_required_mod_release = False
         for name, keys in MOD_MAP.items():
             if key in keys:
                 self._pressed_mods[name] = False
-        if key == TRIGGER:
+                if name in self._required_mods():
+                    was_required_mod_release = True
+        # Trigger release -> stop.
+        if key == self._trigger():
             with self._lock:
-                if not self._recording:
-                    return
-                self._recording = False
-                dur = time.time() - self._record_started_at
-                audio = self.recorder.stop()
-                if self.settings.get("sounds", True):
-                    sounds.play_stop()
-                if dur < float(self.settings.get("min_record_seconds", 0.25)):
-                    log.info("recording too short (%.2fs), discarding", dur)
-                    self.on_state("idle", None, False)
-                    return
-                enhanced = self._enhanced_for_this_press
-                threading.Thread(target=self._run_transcribe, args=(audio, enhanced), daemon=True).start()
+                self._stop_recording_locked()
+            return
+        # Required modifier released while we are recording -> also stop, so
+        # the user doesn't get stuck listening when Windows steals focus and
+        # eats the trigger-release event.
+        if was_required_mod_release:
+            with self._lock:
+                if self._recording:
+                    log.info("required modifier released — stopping safely")
+                    self._stop_recording_locked()
+
+    def _safety_stop(self) -> None:
+        with self._lock:
+            if self._recording:
+                log.warning("safety auto-stop after max_record_seconds")
+                self._stop_recording_locked()
 
     def _run_transcribe(self, audio: np.ndarray, enhanced: bool):
         try:
@@ -298,7 +356,8 @@ class TrayController:
 
     def _hotkey_label(self) -> str:
         mods = "+".join(m.capitalize() for m in self.settings.get("hotkey_modifiers", []))
-        return f"{mods}+Space"
+        trig = (self.settings.get("hotkey_trigger") or "space").replace("_", " ").title()
+        return f"{mods}+{trig}" if mods else trig
 
     def _engine_label(self) -> str:
         eid = self.settings.get("engine", "parakeet_cpu")
@@ -399,8 +458,7 @@ class App:
             self.overlay.hide()
 
     def run(self) -> None:
-        log.info("OpenWritr ready — %s+Space (hold)",
-                 "+".join(m.capitalize() for m in self.settings["hotkey_modifiers"]))
+        log.info("OpenWritr ready — %s (hold)", self.tray._hotkey_label())
         self.tray.run_detached()
         self._listener = self.engine.run()
         try:
