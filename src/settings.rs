@@ -17,7 +17,7 @@ impl Default for Enhance {
             provider: "off".into(),
             base_url: "https://api.openai.com/v1".into(),
             api_key: String::new(),
-            model: "gpt-4o-mini".into(),
+            model: "claude-haiku-4.5".into(),
         }
     }
 }

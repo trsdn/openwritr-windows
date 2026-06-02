@@ -160,6 +160,29 @@ impl eframe::App for SettingsApp {
                 ui.label("API key (OpenAI-compatible only)");
                 if ui.add(egui::TextEdit::singleline(&mut s.enhance.api_key).password(true)).changed() { self.dirty = true; }
                 ui.label("Model");
+                let models = [
+                    ("claude-haiku-4.5", "Claude Haiku 4.5"),
+                    ("gpt-5-mini", "GPT-5 Mini"),
+                    ("gpt-4.1", "GPT-4.1"),
+                ];
+                let current_label = models
+                    .iter()
+                    .find(|(k, _)| *k == s.enhance.model)
+                    .map(|(_, v)| *v)
+                    .unwrap_or(s.enhance.model.as_str());
+                egui::ComboBox::from_id_source("enhance_model")
+                    .selected_text(current_label)
+                    .show_ui(ui, |ui| {
+                        for (k, lbl) in models {
+                            if ui.selectable_value(&mut s.enhance.model, k.to_string(), lbl).changed() {
+                                self.dirty = true;
+                            }
+                        }
+                    });
+                ui.add_space(2.0);
+                ui.label(egui::RichText::new("Or type a custom model name:")
+                    .color(egui::Color32::from_rgb(154, 163, 178))
+                    .size(11.0));
                 if ui.text_edit_singleline(&mut s.enhance.model).changed() { self.dirty = true; }
             });
 

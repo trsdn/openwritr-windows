@@ -34,7 +34,7 @@ pub fn enhance(text: &str, settings: &Settings) -> Result<String> {
         other => return Err(anyhow!("unknown provider {other}")),
     };
     let model = if cfg.model.trim().is_empty() {
-        "gpt-4o-mini".to_string()
+        "claude-haiku-4.5".to_string()
     } else {
         cfg.model.clone()
     };
