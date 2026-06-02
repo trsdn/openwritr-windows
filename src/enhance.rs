@@ -2,7 +2,7 @@
 //!
 //! Blocking reqwest call so we can run it inline on the transcribe thread.
 
-use crate::settings::{Enhance, Settings};
+use crate::settings::Settings;
 use anyhow::{anyhow, Result};
 use parking_lot::Mutex;
 use serde_json::json;

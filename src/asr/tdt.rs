@@ -12,10 +12,11 @@
 //! step>0 is the common case which is what gives the model its real-time
 //! lead over plain RNN-T.
 
+use super::ort_helpers::OrtResultExt;
 use anyhow::{anyhow, Result};
 use ndarray::{Array2, Array3, ArrayD, Axis, Ix3};
 use ort::session::Session;
-use ort::value::Value;
+use ort::value::{Outlet, Value, ValueType};
 
 pub const MAX_TOKENS_PER_STEP: usize = 10;
 
@@ -33,9 +34,9 @@ impl Tdt {
     pub fn init_state(&self, decoder: &Session) -> Result<DecoderState> {
         // We read the input shapes from the decoder's `input_states_*` inputs
         // to honour whatever LSTM size the upstream export used.
-        let inputs = decoder.inputs.iter().collect::<Vec<_>>();
-        let s1 = find_shape(&inputs, "input_states_1")?;
-        let s2 = find_shape(&inputs, "input_states_2")?;
+        let inputs = decoder.inputs();
+        let s1 = find_shape(inputs, "input_states_1")?;
+        let s2 = find_shape(inputs, "input_states_2")?;
         Ok(DecoderState {
             state1: Array3::<f32>::zeros((s1.0, 1, s1.2)),
             state2: Array3::<f32>::zeros((s2.0, 1, s2.2)),
@@ -65,33 +66,30 @@ impl Tdt {
             let target_length = ndarray::Array1::<i32>::from_elem(1, 1);
 
             let inputs = ort::inputs![
-                "encoder_outputs" => Value::from_array(enc_t.into_dyn())?,
-                "targets" => Value::from_array(targets.into_dyn())?,
-                "target_length" => Value::from_array(target_length.into_dyn())?,
-                "input_states_1" => Value::from_array(state.state1.clone().into_dyn())?,
-                "input_states_2" => Value::from_array(state.state2.clone().into_dyn())?,
+                "encoder_outputs" => Value::from_array(enc_t)?,
+                "targets" => Value::from_array(targets)?,
+                "target_length" => Value::from_array(target_length)?,
+                "input_states_1" => Value::from_array(state.state1.clone())?,
+                "input_states_2" => Value::from_array(state.state2.clone())?,
             ];
-            let outs = decoder.run(inputs)?;
+            let outs = decoder.run(inputs).ortx()?;
             let logits = outs
                 .get("outputs")
                 .ok_or_else(|| anyhow!("decoder missing 'outputs'"))?
-                .try_extract_array::<f32>()?
-                .to_owned()
-                .into_owned();
+                .try_extract_array::<f32>().ortx()?
+                .to_owned();
             let s1 = outs
                 .get("output_states_1")
                 .ok_or_else(|| anyhow!("decoder missing output_states_1"))?
-                .try_extract_array::<f32>()?
+                .try_extract_array::<f32>().ortx()?
                 .to_owned()
-                .into_dimensionality::<Ix3>()?
-                .into_owned();
+                .into_dimensionality::<Ix3>()?;
             let s2 = outs
                 .get("output_states_2")
                 .ok_or_else(|| anyhow!("decoder missing output_states_2"))?
-                .try_extract_array::<f32>()?
+                .try_extract_array::<f32>().ortx()?
                 .to_owned()
-                .into_dimensionality::<Ix3>()?
-                .into_owned();
+                .into_dimensionality::<Ix3>()?;
 
             let flat: Vec<f32> = logits.iter().copied().collect();
             if flat.len() < self.vocab_size {
@@ -141,13 +139,13 @@ fn argmax(xs: &[f32]) -> usize {
     best_i
 }
 
-fn find_shape(inputs: &[&ort::session::Input], name: &str) -> Result<(usize, usize, usize)> {
+fn find_shape(inputs: &[Outlet], name: &str) -> Result<(usize, usize, usize)> {
     let input = inputs
         .iter()
-        .find(|i| i.name == name)
+        .find(|i| i.name() == name)
         .ok_or_else(|| anyhow!("decoder input '{name}' missing"))?;
-    let dims = match &input.input_type {
-        ort::value::ValueType::Tensor { shape, .. } => shape,
+    let dims = match input.dtype() {
+        ValueType::Tensor { shape, .. } => shape,
         _ => anyhow::bail!("input '{name}' is not a tensor"),
     };
     if dims.len() < 3 {

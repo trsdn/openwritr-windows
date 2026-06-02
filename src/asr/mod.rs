@@ -11,6 +11,7 @@ mod resample;
 mod tokenizer;
 mod tdt;
 mod whisper_npu;
+mod ort_helpers;
 
 pub use parakeet::ParakeetEngine;
 

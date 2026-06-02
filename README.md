@@ -125,25 +125,28 @@ The zip lands in `target/dist/`.
 
 ## NPU support
 
-The native Rust build **does not** use the NPU yet — it falls back to CPU INT8
-inference even when `parakeet_npu` is selected in Settings. Reason: `ort 2.0-rc.10`
-(the latest version compatible with the rest of our stack) cannot register an
-external execution-provider library. The newer `rc.12` API exposes
-`register_ep_library` but breaks ndarray and Session interop. We are pinned to
-`rc.10` until a later release stabilises both. CPU INT8 is fast enough for
-casual dictation on Snapdragon X (~150 ms for a 10 s utterance).
+**There is no NPU support in either the native Rust or the Python build today.**
+Both run Parakeet on the CPU.
 
-For real NPU acceleration today, use the Python build in `python/`. Same Parakeet
-model, ~1.47× speedup vs CPU INT8, measured on Surface Pro X1E80100. The
-NPU-quantised encoder is published at
-[trsdn/parakeet-tdt-0.6b-v3-htp-int8](https://huggingface.co/trsdn/parakeet-tdt-0.6b-v3-htp-int8).
+Background: Parakeet TDT v3's encoder uses a dynamic-shape attention masking
+pattern (`Shape` → `Gather` → `Range` → `Expand`) that the Qualcomm QNN HTP
+execution provider in `onnxruntime-qnn 2.1.1` cannot evaluate correctly. An
+earlier INT8 QDQ quantization experiment was pushed to HuggingFace under
+`trsdn/parakeet-tdt-0.6b-v3-htp-int8` with optimistic performance claims;
+that model has since been withdrawn because it fails at inference time on
+the NPU. The NPU code path remains in the Rust source (`asr/parakeet.rs::
+build_npu_session`) so that when QNN gains support for the required ops, or
+when the encoder is re-exported with constants for the dynamic shapes,
+flipping the engine setting will activate it without further code changes.
+
+CPU INT8 is fast enough for casual dictation on Snapdragon X — about 150 ms
+of inference per 10 s of audio.
 
 ## Models
 
 | Model | Provider | Size | License | Auto-downloaded? |
 |---|---|---|---|---|
 | Parakeet TDT 0.6B v3 (ONNX, INT8) | [istupakov/parakeet-tdt-0.6b-v3-onnx](https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx) | ~670 MB | CC-BY-4.0 | Yes, on first run |
-| Parakeet TDT 0.6B v3 (HTP INT8 QDQ) | [trsdn/parakeet-tdt-0.6b-v3-htp-int8](https://huggingface.co/trsdn/parakeet-tdt-0.6b-v3-htp-int8) | ~690 MB | CC-BY-4.0 | Yes, when NPU engine selected |
 | Whisper Large v3 Turbo (QNN context binary) | [qualcomm/Whisper-Large-V3-Turbo](https://huggingface.co/qualcomm/Whisper-Large-V3-Turbo) | ~1.6 GB | Apache 2.0 + BSD-3 | Python build only |
 
 ## Licenses
