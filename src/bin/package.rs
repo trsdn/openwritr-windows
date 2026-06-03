@@ -4,17 +4,67 @@ use std::path::{Path, PathBuf};
 use zip::write::SimpleFileOptions;
 
 fn main() -> anyhow::Result<()> {
-    let target = PathBuf::from("target/release");
+    // --arch arm64 (default) or x64. x64 is the Intel/AMD build: CPU INT8
+    // engine only, no Qualcomm QNN runtime (Hexagon is Snapdragon-only).
+    let args: Vec<String> = std::env::args().collect();
+    let arch = args
+        .windows(2)
+        .find(|w| w[0] == "--arch")
+        .map(|w| w[1].as_str())
+        .unwrap_or("arm64")
+        .to_string();
+    let is_x64 = arch == "x64";
+
+    // For x64 the exe is built into a target-triple subdir; arm64 (host) uses
+    // the plain target/release. onnxruntime.dll for x64 is vendored separately
+    // (CPU build from PyPI) since onnxruntime-qnn only ships the arm64 DLL.
+    let target = if is_x64 {
+        PathBuf::from("target/x86_64-pc-windows-msvc/release")
+    } else {
+        PathBuf::from("target/release")
+    };
     let dist = PathBuf::from("target/dist");
     let venv_qnn = PathBuf::from(".venv/Lib/site-packages/onnxruntime_qnn");
+    let vendor_x64 = PathBuf::from("vendor/x64");
     std::fs::create_dir_all(&dist)?;
 
     let version = env!("CARGO_PKG_VERSION");
-    let out_zip = dist.join(format!("openwritr-windows-arm64-v{version}.zip"));
-    println!("packaging -> {}", out_zip.display());
+    let arch_tag = if is_x64 { "x64" } else { "arm64" };
+    let out_zip = dist.join(format!("openwritr-windows-{arch_tag}-v{version}.zip"));
+    println!("packaging ({arch}) -> {}", out_zip.display());
 
     let mut z = zip::ZipWriter::new(File::create(&out_zip)?);
     let opts = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+
+    // x64 path: just the exe + CPU onnxruntime.dll + docs. No QNN at all.
+    if is_x64 {
+        add_file(&mut z, &target.join("openwritr.exe"), "openwritr.exe", opts)?;
+        let ort = vendor_x64.join("onnxruntime.dll");
+        if !ort.exists() {
+            anyhow::bail!(
+                "missing {} — fetch the x64 CPU onnxruntime.dll first (see scripts/fetch_x64_ort.py)",
+                ort.display()
+            );
+        }
+        add_file(&mut z, &ort, "onnxruntime.dll", opts)?;
+        add_file(&mut z, Path::new("README.md"), "README.md", opts)?;
+        if Path::new("LICENSE").exists() {
+            add_file(&mut z, Path::new("LICENSE"), "LICENSE", opts)?;
+        }
+        // ONNX Runtime is MIT; ship its license note.
+        for (src_name, zip_name) in [
+            ("ThirdPartyNotices.txt", "third-party-licenses/ThirdPartyNotices.txt"),
+        ] {
+            let p = venv_qnn.join(src_name);
+            if p.exists() {
+                add_file(&mut z, &p, zip_name, opts)?;
+            }
+        }
+        z.finish()?;
+        let size = out_zip.metadata()?.len();
+        println!("done -> {} ({:.2} MB)", out_zip.display(), size as f32 / 1_000_000.0);
+        return Ok(());
+    }
 
     // Files we expect to exist in target/release/ — built by cargo, no fallback.
     let must_have = ["openwritr.exe", "onnxruntime.dll"];

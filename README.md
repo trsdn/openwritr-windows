@@ -17,17 +17,29 @@ GPT-4.1) or any OpenAI-compatible endpoint.
 
 ## Quick start
 
-Two ways to install, both per-user (no admin / UAC required):
+Pick the build for your CPU, both per-user (no admin / UAC required):
+
+| Your machine | Build | Engine |
+|---|---|---|
+| **Snapdragon X** (Surface Pro 11, etc.) | `…-arm64-…` | Hexagon NPU + CPU fallback |
+| **Intel / AMD** laptop | `…-x64-…` | CPU INT8 |
+
+Not sure? Snapdragon laptops report "ARM-based processor" in Settings →
+System → About. Everything else is x64.
 
 **Installer (recommended).** Download
-`openwritr-windows-arm64-vX.Y.Z-setup.exe` from
+`openwritr-windows-<arch>-vX.Y.Z-setup.exe` from
 [Releases](https://github.com/trsdn/openwritr-windows/releases/latest)
 and run it. Sets up the Start Menu shortcut, an optional autostart-at-logon
 entry, and a proper uninstaller you'll find under Settings → Apps.
 
-**Portable zip.** Download `openwritr-windows-arm64-vX.Y.Z.zip`, unzip
+**Portable zip.** Download `openwritr-windows-<arch>-vX.Y.Z.zip`, unzip
 into `%LOCALAPPDATA%\OpenWritr\app\`, run `openwritr.exe`. Same binaries,
 no shortcuts, no autostart.
+
+The x64 build runs Parakeet on the CPU (no Hexagon NPU on Intel/AMD); the
+arm64 build adds the NPU engine. Both share the same multilingual model and
+UX.
 
 On first launch the Parakeet model is fetched from Hugging Face into
 `%LOCALAPPDATA%\OpenWritr\models\` — one-time, ~1.2 GB on the NPU engine

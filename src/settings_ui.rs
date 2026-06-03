@@ -112,15 +112,24 @@ impl eframe::App for SettingsApp {
 
             // Engine
             section(ui, "TRANSCRIPTION ENGINE", |ui| {
-                let engines = [
-                    ("parakeet_cpu", "Parakeet TDT v3 — CPU INT8 (default)"),
-                    ("parakeet_npu", "Parakeet TDT v3 — NPU INT8 (CPU fallback in native)"),
-                    ("whisper_npu",  "Whisper Large v3 Turbo — NPU (CPU fallback in native)"),
+                // The Hexagon NPU only exists on Snapdragon (arm64). On the
+                // Intel/AMD (x86_64) build there's no QNN runtime, so only the
+                // CPU engine is offered — picking NPU there would just fall
+                // back to CPU anyway.
+                #[cfg(target_arch = "aarch64")]
+                let engines: &[(&str, &str)] = &[
+                    ("parakeet_cpu", "Parakeet TDT v3 — CPU INT8"),
+                    ("parakeet_npu", "Parakeet TDT v3 — Hexagon NPU"),
+                    ("whisper_npu",  "Whisper Large v3 Turbo — NPU"),
+                ];
+                #[cfg(not(target_arch = "aarch64"))]
+                let engines: &[(&str, &str)] = &[
+                    ("parakeet_cpu", "Parakeet TDT v3 — CPU INT8"),
                 ];
                 egui::ComboBox::from_id_source("engine")
                     .selected_text(engines.iter().find(|(k, _)| *k == s.engine).map(|(_, v)| *v).unwrap_or(s.engine.as_str()))
                     .show_ui(ui, |ui| {
-                        for (k, lbl) in engines {
+                        for &(k, lbl) in engines {
                             if ui.selectable_value(&mut s.engine, k.to_string(), lbl).changed() {
                                 self.dirty = true;
                             }
