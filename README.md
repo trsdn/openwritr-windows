@@ -5,8 +5,9 @@
 [![Latest release](https://img.shields.io/github/v/release/trsdn/openwritr-windows)](https://github.com/trsdn/openwritr-windows/releases/latest)
 
 Push-to-talk voice-to-text for **Windows on ARM** (Surface Pro / Snapdragon X
-Elite). Local transcription via **NVIDIA Parakeet TDT 0.6B v3** (INT8 ONNX,
-25 languages). Optional LLM cleanup via **GitHub Copilot** (Claude Haiku 4.5,
+Elite). Local transcription via **NVIDIA Parakeet TDT 0.6B v3** running on
+the **Hexagon NPU** (or CPU INT8 fallback). 25 languages, ~67 ms per 8-second
+window on the NPU. Optional LLM cleanup via **GitHub Copilot** (Claude Haiku 4.5,
 GPT-5 Mini, GPT-4.1) or any OpenAI-compatible endpoint.
 
 Windows port of [trsdn/OpenWritr](https://github.com/trsdn/OpenWritr) (macOS).
@@ -40,10 +41,11 @@ Tray icon → right-click → **Settings**. All fields:
 - **Hotkey**: any combination of Ctrl / Shift / Alt / Win modifiers, plus an
   optional trigger key (Space, Tab, Caps Lock, F13-F20, or `None` for
   modifiers-only). Default: Ctrl+Win, no trigger.
-- **Transcription engine**: Parakeet CPU INT8 (default), Parakeet NPU,
-  Whisper Large v3 Turbo NPU. The native build currently falls back to CPU
-  for both NPU options (see *NPU support* below). The Python build supports
-  real NPU.
+- **Transcription engine**: Parakeet CPU INT8, **Parakeet NPU** (default for
+  v0.3+), Whisper Large v3 Turbo NPU. The NPU engine runs the encoder on
+  the Snapdragon X Elite Hexagon HTP via a pre-compiled QAIRT context
+  binary; preprocessor and TDT decoder remain on the CPU. Falls back to
+  CPU INT8 automatically if the NPU model fails to load.
 - **Behaviour**: auto-paste at cursor, show overlay while recording, play
   start/stop sounds.
 - **Enhance**: provider (Off / GitHub Copilot / OpenAI-compatible API), model
@@ -63,11 +65,14 @@ openwritr-windows/
 │   ├── main.rs              entry; dispatches `--settings` subprocess
 │   ├── app.rs               winit event loop, tray, hotkey thread, ASR dispatch
 │   ├── audio.rs             cpal WASAPI capture, multi-channel downmix
-│   ├── hotkey.rs            GlobalHotKeyManager + GetAsyncKeyState polling
+│   ├── hotkey.rs            push-to-talk combo polling against key_hook state
+│   ├── key_hook.rs          global WH_KEYBOARD_LL hook → atomic key bitmap
 │   ├── overlay.rs           custom Win32 layered top-most window, GDI bars
 │   ├── settings.rs          serde struct + JSON load/save
 │   ├── settings_ui.rs       eframe/egui dialog (subprocess)
 │   ├── asr/                 ONNX Runtime pipeline (mel → encoder → TDT decoder)
+│   │   ├── parakeet.rs      Encoder enum {Cpu, Npu} + chunked long-audio pipeline
+│   │   └── qnn_ffi.rs       direct C-API FFI for the NPU encoder session
 │   ├── enhance.rs           Copilot / OpenAI cleanup pass
 │   ├── sounds.rs            G3/E3 tone synth (start/stop pings)
 │   └── bin/package.rs       distributable-zip builder
@@ -75,10 +80,12 @@ openwritr-windows/
 ```
 
 Key design decisions:
-- **Hotkey on its own thread.** Push-to-talk detection runs in a dedicated
-  thread with `GetAsyncKeyState`, sending press/release events to the winit
-  loop via `EventLoopProxy`. This survives any UI hang and works even if
-  Windows reserves the combo (`RegisterHotKey` is best-effort only).
+- **Global low-level keyboard hook.** Push-to-talk detection reads physical
+  key state from `WH_KEYBOARD_LL` instead of `GetAsyncKeyState`. The OS
+  synthesises key-ups during focus changes (PowerShell launched mid-recording,
+  UAC prompt, system shortcut handler), which the polling API faithfully
+  reports — and which would abort the recording. The LL hook sees only
+  physical events.
 - **Settings UI as subprocess.** The settings dialog is the same exe re-launched
   with `--settings`. Spawning happens from a worker thread because
   `CreateProcessW` on Windows ARM64 with Defender real-time scanning can block
@@ -91,13 +98,15 @@ Key design decisions:
   array on Surface Pro exposes 4-8 interleaved channels at 48 kHz; we average
   to mono before resampling to 16 kHz.
 
-### Python legacy app (`python/`)
+### Python toolchain (`scripts/`)
 
-The original Python v0.1 still lives in the repo because it is currently the
-**only** way to use the NPU end-to-end. It uses the same Parakeet model and a
-companion Whisper NPU implementation. See [`python/`](python/) for details.
+NPU model preparation lives in `scripts/`. `build_npu_encoder.py`,
+`aihub_compile_encoder.py`, `wrap_qnn_context_binary.py`, and
+`test_npu_encoder.py` are build-time tools used to produce the .bin
+hosted on HF. They are NOT invoked by the shipped `openwritr.exe` at
+runtime — the native build pulls the pre-compiled binary directly.
 
-The Rust native app does not call into Python at runtime.
+The Rust app does not call into Python at runtime.
 
 ### Build-time Python dependency
 
@@ -123,31 +132,73 @@ cargo run --release --bin package
 
 The zip lands in `target/dist/`.
 
-## NPU support
+## NPU pipeline
 
-**There is no NPU support in either the native Rust or the Python build today.**
-Both run Parakeet on the CPU.
+The encoder runs as a pre-compiled QAIRT context binary on the Hexagon HTP
+of the Snapdragon X Elite. Preprocessor (mel features) and TDT decoder
+remain on the CPU EP — they are dynamic-shape, lightweight, and not a
+bottleneck.
 
-Background: Parakeet TDT v3's encoder uses a dynamic-shape attention masking
-pattern (`Shape` → `Gather` → `Range` → `Expand`) that the Qualcomm QNN HTP
-execution provider in `onnxruntime-qnn 2.1.1` cannot evaluate correctly. An
-earlier INT8 QDQ quantization experiment was pushed to HuggingFace under
-`trsdn/parakeet-tdt-0.6b-v3-htp-int8` with optimistic performance claims;
-that model has since been withdrawn because it fails at inference time on
-the NPU. The NPU code path remains in the Rust source (`asr/parakeet.rs::
-build_npu_session`) so that when QNN gains support for the required ops, or
-when the encoder is re-exported with constants for the dynamic shapes,
-flipping the engine setting will activate it without further code changes.
+The compiled binary expects a fixed **8-second audio window**. For
+push-to-talk utterances ≤ 8 s the encoder is run once on a padded window.
+For longer audio the encoder is run in chunks (8 s window with 1 s
+overlap), feature streams are stitched at the seam, and the TDT decoder
+runs once over the concatenated features. Tested up to ~23 s without
+boundary doubling.
 
-CPU INT8 is fast enough for casual dictation on Snapdragon X — about 150 ms
-of inference per 10 s of audio.
+### Measured on Snapdragon X Elite (X1E80100)
+
+| Audio length | Decode (preproc + encode + TDT) | × Realtime | Chunks |
+|---|---|---|---|
+| 3 s | 128 ms | 23× | 1 |
+| 5.8 s | 221 ms | 26× | 1 |
+| 16.4 s | 375 ms | 44× | 3 |
+| 23.0 s | 626 ms | 37× | 4 |
+
+The encoder itself is ~67 ms ± 0 ms per 8-second window, independent of
+the actual audio length within the window.
+
+### How the binary was built
+
+1. `scripts/build_npu_encoder.py` constant-folds the encoder's
+   dynamic-shape attention mask (`Shape → Gather → Range → Expand`) against
+   a frozen `[1, 128, 801]` input — the HTP backend cannot evaluate that
+   subgraph as-is.
+2. `scripts/aihub_compile_encoder.py` submits the static-shape FP32 ONNX
+   plus FLEURS calibration samples to Qualcomm AI Hub. Quantize job uses
+   INT8 weights / INT16 activations (the standard HTP recipe for
+   transformer encoders); compile job targets `snapdragon_x_elite_crd`
+   with `--target_runtime qnn_context_binary --truncate_64bit_io`.
+3. `scripts/wrap_qnn_context_binary.py` wraps the resulting `.bin` in a
+   408-byte EPContext-node ONNX so ORT's QNN EP can consume it.
+4. `src/asr/qnn_ffi.rs` loads the wrapper via direct `ort_sys` C-API calls,
+   bypassing `ort` 2.0-rc.12's session builders (which crash inside QnnHtp
+   when consuming EPContext-wrapper ONNX).
+
+### Required helper DLLs
+
+The QNN backend loads several sibling DLLs by name at session-create time.
+`src/bin/package.rs` stages all of them into the release zip, but if you
+hand-assemble a distribution: alongside `onnxruntime_providers_qnn.dll`
+you need `QnnHtp.dll`, `QnnHtpPrepare.dll`, `QnnSystem.dll`, the V73/V81
+stubs (`QnnHtpV73Stub.dll`, `QnnHtpV81Stub.dll`), the per-arch skeletons
+(`libQnnHtpV73Skel.so`, `libQnnHtpV81Skel.so`), and the catalog files
+(`libqnnhtpv73.cat`, `libqnnhtpv81.cat`). Without the SKEL + .cat pair, the
+stub fails `LoadLibrary` with `ERROR_MOD_NOT_FOUND` (126) and QnnHtp later
+aborts session creation with `STATUS_STACK_BUFFER_OVERRUN` (0xC0000409)
+without a useful error.
 
 ## Models
 
 | Model | Provider | Size | License | Auto-downloaded? |
 |---|---|---|---|---|
-| Parakeet TDT 0.6B v3 (ONNX, INT8) | [istupakov/parakeet-tdt-0.6b-v3-onnx](https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx) | ~670 MB | CC-BY-4.0 | Yes, on first run |
+| Parakeet TDT 0.6B v3 (CPU INT8 ONNX + companion files) | [istupakov/parakeet-tdt-0.6b-v3-onnx](https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx) | ~670 MB | CC-BY-4.0 | Yes, on first run |
+| Parakeet TDT 0.6B v3 NPU encoder (QAIRT context binary + wrapper) | [trsdn/parakeet-tdt-0.6b-v3-htp-int8-8s](https://huggingface.co/trsdn/parakeet-tdt-0.6b-v3-htp-int8-8s) | ~632 MB | CC-BY-4.0 | Yes, on first NPU launch |
 | Whisper Large v3 Turbo (QNN context binary) | [qualcomm/Whisper-Large-V3-Turbo](https://huggingface.co/qualcomm/Whisper-Large-V3-Turbo) | ~1.6 GB | Apache 2.0 + BSD-3 | Python build only |
+
+The NPU encoder model is device-gated to Snapdragon X Elite (Hexagon V73).
+It will not run on X Plus or any other Qualcomm chipset without
+recompilation via AI Hub.
 
 ## Licenses
 
