@@ -128,7 +128,7 @@ pip install onnxruntime-qnn
 After that, build + package:
 
 ```powershell
-.\envup.ps1        # primes vcvars arm64 + LLVM in PATH
+.\scripts\envup.ps1        # primes vcvars arm64 + LLVM in PATH
 cargo build --release --bin openwritr
 cargo run --release --bin package
 ```
@@ -240,7 +240,7 @@ cd openwritr-windows
 py -3.11-arm64 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install onnxruntime-qnn
-.\envup.ps1
+.\scripts\envup.ps1
 cargo run --release --bin openwritr
 ```
 

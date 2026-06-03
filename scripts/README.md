@@ -13,6 +13,7 @@ on first launch.
 | `wrap_qnn_context_binary.py` | Wraps the AI Hub `.bin` in a 408-byte EPContext-node ONNX so ORT's QNN EP can consume it. Pulls the I/O specs (renamed `output_0` / `output_1`, `length` as int32 after `--truncate_64bit_io`) from the AI Hub model directly via `qai-hub`. |
 | `test_npu_encoder.py` | Standalone Python validator: registers the QNN EP, loads the wrapper via `OrtEpDevice`, runs a synthetic mel-shaped tensor through the encoder and times the steady-state. Useful for proving the model is sound independent of any Rust code. |
 | `bench_nexa_parakeet.ps1` | Benchmark scaffold for NexaAI's pre-compiled NPU Parakeet (license-gated, not used in distribution). Kept as a reference for comparing alternative QNN HTP runtimes. |
+| `envup.ps1` | Dev-shell setup: primes vcvars arm64 + LLVM in the current PowerShell session so `cargo build` finds the MSVC toolchain. Source it once per shell (`.\scripts\envup.ps1`) before any cargo command. |
 
 ## Setup
 
