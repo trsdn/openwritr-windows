@@ -77,13 +77,24 @@ pub fn ensure_parakeet_cpu_int8() -> Result<PathBuf> {
 
 #[allow(dead_code)]
 pub fn ensure_parakeet_npu_int8() -> Result<PathBuf> {
+    // Encoder: a pre-compiled QAIRT context binary (encoder-model.bin) wrapped
+    // in a thin EPContext-node ONNX (encoder-model.onnx). The .bin was built
+    // by Qualcomm AI Hub from the FP32 encoder + FLEURS calibration, with a
+    // static 8-second audio window (see MAX_NPU_SECONDS in asr::parakeet).
+    //
+    // Decoder/preprocessor/vocab reuse the istupakov CPU INT8 files via the
+    // local-cache short-circuit in `ensure()` — they're identical and run on
+    // CPU EP regardless of which encoder backend is selected.
+    //
+    // Repo not yet populated. End-users must build the .bin themselves via
+    // scripts/aihub_compile_encoder.py until we publish.
     ensure(&ModelSpec {
-        repo: "trsdn/parakeet-tdt-0.6b-v3-htp-int8",
-        local_dir: "parakeet-tdt-0.6b-v3-htp-int8",
+        repo: "trsdn/parakeet-tdt-0.6b-v3-htp-int8-8s",
+        local_dir: "parakeet-tdt-0.6b-v3-htp-int8-8s",
         files: &[
             "encoder-model.onnx",
-            "encoder-model.onnx.data",
-            "decoder_joint-model.onnx",
+            "encoder-model.bin",
+            "decoder_joint-model.int8.onnx",
             "nemo128.onnx",
             "vocab.txt",
             "config.json",

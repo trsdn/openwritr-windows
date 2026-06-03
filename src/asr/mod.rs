@@ -7,6 +7,7 @@
 use anyhow::Result;
 
 mod parakeet;
+mod qnn_ffi;
 mod resample;
 mod tokenizer;
 mod tdt;

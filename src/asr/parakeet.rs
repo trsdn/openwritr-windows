@@ -5,6 +5,7 @@
 //! available we fall back to CPU INT8.
 
 use super::ort_helpers::OrtResultExt;
+use super::qnn_ffi::{enumerate_qnn_npu_devices, NpuEncoderFfi};
 use super::{resample, tokenizer::Vocab};
 use super::tdt::Tdt;
 use crate::asr::Engine;
@@ -16,12 +17,20 @@ use ort::value::Value;
 use parking_lot::Mutex;
 use std::path::{Path, PathBuf};
 use std::sync::Once;
+#[cfg(windows)]
+use std::os::windows::ffi::OsStrExt;
 use std::time::Instant;
 use tracing::{info, warn};
 
 static ORT_INIT: Once = Once::new();
 
-pub const MAX_NPU_SECONDS: f32 = 28.0;
+// The AI-Hub-compiled QNN context binary was calibrated and compiled at a
+// fixed 8-second audio window. Inputs are padded to exactly this length;
+// utterances longer than this are truncated. Trade-off vs. a longer window:
+// the encoder cost is dominated by the static window, not the real audio
+// length, so a shorter window means faster steady-state inference at the
+// cost of capping the max push-to-talk duration.
+pub const MAX_NPU_SECONDS: f32 = 8.0;
 
 fn init_ort_once() {
     ORT_INIT.call_once(|| {
@@ -30,6 +39,33 @@ fn init_ort_once() {
                 let local = dir.join("onnxruntime.dll");
                 if local.exists() {
                     std::env::set_var("ORT_DYLIB_PATH", &local);
+                }
+                // Mirror Python's os.add_dll_directory + import onnxruntime_qnn.
+                // QnnHtp.dll's EPContext loader has internal state that gets
+                // initialized when the DLL is first loaded; without an explicit
+                // preload, the deferred load triggered by CreateSession races
+                // with __security_check_cookie inside QnnHtp and crashes with
+                // STATUS_STACK_BUFFER_OVERRUN (0xC0000409).
+                #[cfg(windows)]
+                unsafe {
+                    use windows::core::PCWSTR;
+                    use windows::Win32::System::LibraryLoader::{AddDllDirectory, LoadLibraryW};
+                    let dir_w: Vec<u16> = dir.as_os_str()
+                        .encode_wide()
+                        .chain(std::iter::once(0))
+                        .collect();
+                    let _ = AddDllDirectory(PCWSTR(dir_w.as_ptr()));
+                    // Pre-load the QnnHtp backend so it initializes on the
+                    // main thread before ORT's session creation calls it.
+                    for dll in ["QnnSystem.dll", "QnnHtpPrepare.dll", "QnnHtp.dll"] {
+                        let path = dir.join(dll);
+                        let p_w: Vec<u16> = path.as_os_str()
+                            .encode_wide()
+                            .chain(std::iter::once(0))
+                            .collect();
+                        let h = LoadLibraryW(PCWSTR(p_w.as_ptr()));
+                        info!("preload {} -> {:?}", dll, h.is_ok());
+                    }
                 }
             }
         }
@@ -76,9 +112,14 @@ pub enum Backend {
     Npu,
 }
 
+enum Encoder {
+    Cpu(Mutex<Session>),
+    Npu(NpuEncoderFfi),
+}
+
 pub struct ParakeetEngine {
     backend: Backend,
-    encoder: Mutex<Session>,
+    encoder: Encoder,
     decoder_joint: Mutex<Session>,
     preprocessor: Mutex<Session>,
     vocab: Vocab,
@@ -124,16 +165,17 @@ impl ParakeetEngine {
         // their graph offered to QNN, which then chokes on dynamic shapes
         // in the decoder ("Dynamic shape is not supported yet").
         let preprocessor = build_cpu_session(&dir.join("nemo128.onnx"))?;
-        let decoder_filename = match backend {
-            Backend::Cpu => "decoder_joint-model.int8.onnx",
-            Backend::Npu => "decoder_joint-model.onnx",
-        };
-        let decoder_joint = build_cpu_session(&dir.join(decoder_filename))?;
+        // CPU INT8 decoder for both backends — only the encoder differs (HTP
+        // for NPU, CPU INT8 for CPU). The decoder runs on the CPU EP either way
+        // because its dynamic-shape TDT loop doesn't map to HTP.
+        let decoder_joint = build_cpu_session(&dir.join("decoder_joint-model.int8.onnx"))?;
 
         // Now register QNN (if NPU requested) and build the encoder session.
         let encoder = match backend {
-            Backend::Cpu => build_cpu_session(&dir.join("encoder-model.int8.onnx"))?,
-            Backend::Npu => build_npu_session(&dir.join("encoder-model.onnx"))?,
+            Backend::Cpu => Encoder::Cpu(Mutex::new(
+                build_cpu_session(&dir.join("encoder-model.int8.onnx"))?,
+            )),
+            Backend::Npu => Encoder::Npu(build_npu_ffi(&dir.join("encoder-model.onnx"))?),
         };
 
         let vocab = Vocab::load(&dir.join("vocab.txt"))?;
@@ -151,7 +193,7 @@ impl ParakeetEngine {
 
         Ok(Self {
             backend,
-            encoder: Mutex::new(encoder),
+            encoder,
             decoder_joint: Mutex::new(decoder_joint),
             preprocessor: Mutex::new(preprocessor),
             vocab,
@@ -190,10 +232,10 @@ impl Engine for ParakeetEngine {
 
 impl ParakeetEngine {
     fn run_pipeline(&self, pcm_16k: &[f32]) -> Result<String> {
-        // NPU calibration was done at a fixed audio length; both shorter and
-        // longer inputs break /Expand. Pad/truncate to exactly 28 s for NPU,
-        // but keep wave_len at the *real* audio length so the encoder still
-        // emits frames only for that portion.
+        // The AI-Hub-compiled context binary expects exactly MAX_NPU_SECONDS
+        // of audio (statically baked into the graph). Pad short input with
+        // zeros; truncate long input. Decoder will see blank emissions over
+        // silence — that's fine, the TDT loop terminates on blank tokens.
         let pcm_npu;
         let real_len_samples = pcm_16k.len().min((MAX_NPU_SECONDS * 16_000.0) as usize);
         let pcm_16k: &[f32] = if self.backend == Backend::Npu {
@@ -239,25 +281,41 @@ impl ParakeetEngine {
             (features, features_lens)
         };
 
-        let enc_in = ort::inputs![
-            "audio_signal" => Value::from_array(features)?,
-            "length" => Value::from_array(features_lens)?,
-        ];
-        let (encoder_out, encoder_lens) = {
-            let mut enc = self.encoder.lock();
-            let enc_out_map = enc.run(enc_in).ortx()?;
-            let encoder_out = enc_out_map
-                .get("outputs")
-                .ok_or_else(|| anyhow!("encoder missing 'outputs'"))?
-                .try_extract_array::<f32>().ortx()?
-                .to_owned()
-                .into_dimensionality::<Ix3>()?;
-            let encoder_lens = enc_out_map
-                .get("encoded_lengths")
-                .ok_or_else(|| anyhow!("encoder missing 'encoded_lengths'"))?
-                .try_extract_array::<i64>().ortx()?
-                .to_owned();
-            (encoder_out, encoder_lens)
+        // Encoder runs via two completely different code paths:
+        // - CPU: the standard `ort::Session` route on the istupakov INT8 ONNX.
+        // - NPU: direct C-API FFI into the QNN HTP backend with the AI-Hub
+        //   pre-compiled context binary, because `ort` 2.0-rc.12's session
+        //   builders crash inside QnnHtp when consuming EPContext-wrapper
+        //   ONNX (see src/asr/qnn_ffi.rs).
+        let (encoder_out, encoder_lens) = match &self.encoder {
+            Encoder::Cpu(sess) => {
+                let mut enc = sess.lock();
+                let enc_in = ort::inputs![
+                    "audio_signal" => Value::from_array(features)?,
+                    "length" => Value::from_array(features_lens)?,
+                ];
+                let enc_out_map = enc.run(enc_in).ortx()?;
+                let encoder_out = enc_out_map
+                    .get("outputs")
+                    .ok_or_else(|| anyhow!("encoder missing 'outputs'"))?
+                    .try_extract_array::<f32>().ortx()?
+                    .to_owned()
+                    .into_dimensionality::<Ix3>()?;
+                let encoder_lens = enc_out_map
+                    .get("encoded_lengths")
+                    .ok_or_else(|| anyhow!("encoder missing 'encoded_lengths'"))?
+                    .try_extract_array::<i64>().ortx()?
+                    .to_owned();
+                (encoder_out, encoder_lens)
+            }
+            Encoder::Npu(npu) => {
+                // FFI run takes a contiguous ArrayView3<f32> + int32 length.
+                // features arrived as Array3<f32> from the preprocessor.
+                let length_i32 = features_lens.iter().next().copied().unwrap_or(0) as i32;
+                let (out_arr, encoded_len_i32) = npu.run(features.view(), length_i32)?;
+                let encoder_lens = Array1::from_elem(1, encoded_len_i32 as i64).into_dyn();
+                (out_arr, encoder_lens)
+            }
         };
 
         let encoder_out_owned = encoder_out
@@ -290,28 +348,18 @@ fn build_cpu_session(path: &Path) -> Result<Session> {
         .with_context(|| format!("load {}", path.display()))
 }
 
-fn build_npu_session(path: &Path) -> Result<Session> {
-    use ort::memory::DeviceType;
+fn build_npu_ffi(path: &Path) -> Result<NpuEncoderFfi> {
+    use ort::AsPointer;
     register_qnn_if_needed()?;
     let env = ort::environment::Environment::current().ortx()?;
-    let npu_devices: Vec<_> = env.devices().filter(|d| d.ty() == DeviceType::NPU).collect();
-    if npu_devices.is_empty() {
-        return Err(anyhow!("no NPU device discovered by ORT"));
+    let env_ptr = env.ptr();
+    let npu_devs = enumerate_qnn_npu_devices(env_ptr)
+        .context("enumerate QNN NPU devices")?;
+    if npu_devs.is_empty() {
+        return Err(anyhow!("no QNN NPU device discovered by ORT"));
     }
-    info!(count = npu_devices.len(), "found NPU device(s); building HTP session");
-    let exe_dir = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
-        .unwrap_or_default();
-    let cache_path = exe_dir.join("parakeet-encoder.qnn_ctx.onnx");
-    let opts = vec![
-        ("QNNExecutionProvider.htp_performance_mode".to_string(), "burst".to_string()),
-        ("QNNExecutionProvider.context_cache_enable".to_string(), "1".to_string()),
-        ("QNNExecutionProvider.context_file_path".to_string(), cache_path.to_string_lossy().into_owned()),
-    ];
-    Session::builder().ortx()?
-        .with_devices(npu_devices.into_iter(), Some(&opts)).ortx()?
-        .commit_from_file(path).ortx()
+    info!(count = npu_devs.len(), "found QNN NPU device(s); building HTP session via FFI");
+    NpuEncoderFfi::load(env_ptr, &npu_devs, path)
         .with_context(|| format!("load NPU {}", path.display()))
 }
 

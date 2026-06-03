@@ -194,16 +194,24 @@ impl AppHandler {
         self.state.engine_loading.store(true, Ordering::Relaxed);
         let engine_name = self.state.settings.engine.clone();
         let loading_flag = self.state.engine_loading.clone();
-        thread::spawn(move || {
-            match asr::load(&engine_name) {
-                Ok(e) => {
-                    info!("engine loaded: {}", e.label());
-                    STAGED_ENGINE.lock().replace(Arc::from(e));
+        // The default Windows worker-thread stack is 1 MiB. QnnHtp.dll's
+        // EPContext binary loader needs more and triggers
+        // STATUS_STACK_BUFFER_OVERRUN (0xC0000409, /GS cookie corruption
+        // from stack overflow). Give it a generous 32 MiB. Cheap on x64.
+        thread::Builder::new()
+            .name("engine-loader".into())
+            .stack_size(32 * 1024 * 1024)
+            .spawn(move || {
+                match asr::load(&engine_name) {
+                    Ok(e) => {
+                        info!("engine loaded: {}", e.label());
+                        STAGED_ENGINE.lock().replace(Arc::from(e));
+                    }
+                    Err(e) => warn!(error = %e, "engine load failed"),
                 }
-                Err(e) => warn!(error = %e, "engine load failed"),
-            }
-            loading_flag.store(false, Ordering::Relaxed);
-        });
+                loading_flag.store(false, Ordering::Relaxed);
+            })
+            .expect("spawn engine-loader thread");
     }
 }
 
