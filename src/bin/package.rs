@@ -6,6 +6,7 @@ use zip::write::SimpleFileOptions;
 fn main() -> anyhow::Result<()> {
     let target = PathBuf::from("target/release");
     let dist = PathBuf::from("target/dist");
+    let venv_qnn = PathBuf::from(".venv/Lib/site-packages/onnxruntime_qnn");
     std::fs::create_dir_all(&dist)?;
 
     let version = env!("CARGO_PKG_VERSION");
@@ -15,30 +16,60 @@ fn main() -> anyhow::Result<()> {
     let mut z = zip::ZipWriter::new(File::create(&out_zip)?);
     let opts = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
 
+    // Files we expect to exist in target/release/ — built by cargo, no fallback.
     let must_have = ["openwritr.exe", "onnxruntime.dll"];
-    let should_have = [
-        "onnxruntime_providers_shared.dll", "onnxruntime_providers_qnn.dll",
-        "QnnHtp.dll", "QnnHtpPrepare.dll", "QnnHtpV73Stub.dll", "QnnHtpV81Stub.dll",
-        "QnnSystem.dll", "QnnCpu.dll", "QnnGpu.dll", "QnnIr.dll", "Genie.dll",
+    // QNN runtime: copied from `.venv\Lib\site-packages\onnxruntime_qnn\` by
+    // pip install onnxruntime-qnn. We resolve each file from target/release/
+    // (where the user — or this very script — staged it) OR fall back to the
+    // venv on a fresh checkout. Anything pulled from venv is also copied into
+    // target/release/ so subsequent local `openwritr.exe` runs find their DLLs.
+    let qnn_runtime = [
+        "onnxruntime_providers_qnn.dll",
+        // EP plugin + HTP backend chain.
+        "QnnHtp.dll", "QnnHtpPrepare.dll",
+        // Per-Hexagon-arch stub DLLs. V73 = Snapdragon X Elite / 8 Gen 3,
+        // V81 = next-gen. Without their sibling Skel.so + .cat files the
+        // stub fails LoadLibrary with err=126 (ERROR_MOD_NOT_FOUND), and
+        // QnnHtp's CreateSession then aborts with STATUS_STACK_BUFFER_OVERRUN
+        // — not an obvious error, hence the misery hunting it down.
+        "QnnHtpV73Stub.dll", "QnnHtpV81Stub.dll",
         "libQnnHtpV73Skel.so", "libQnnHtpV81Skel.so",
         "libqnnhtpv73.cat", "libqnnhtpv81.cat",
+        // Sibling backends — not used by openwritr today but cheap to ship.
+        "QnnSystem.dll", "QnnCpu.dll", "QnnGpu.dll", "QnnIr.dll", "Genie.dll",
     ];
 
-    for name in &must_have { add_file(&mut z, &target.join(name), name, opts)?; }
-    for name in &should_have {
-        let p = target.join(name);
-        if p.exists() { add_file(&mut z, &p, name, opts)?; }
+    // Required artifacts: hard-fail if missing.
+    for name in &must_have {
+        add_file(&mut z, &target.join(name), name, opts)?;
     }
+
+    // QNN runtime: try staged target/release, then venv. Mirror into
+    // target/release so `cargo run` (sans this packager) also works.
+    for name in &qnn_runtime {
+        let staged = target.join(name);
+        let from_venv = venv_qnn.join(name);
+        let src = if staged.exists() {
+            staged.clone()
+        } else if from_venv.exists() {
+            std::fs::copy(&from_venv, &staged)
+                .map_err(|e| anyhow::anyhow!("stage {name} from venv to target/release: {e}"))?;
+            println!("  (staged {name} from venv → target/release)");
+            staged
+        } else {
+            eprintln!("  WARN: {name} not found in target/release or {} — skipping",
+                      venv_qnn.display());
+            continue;
+        };
+        add_file(&mut z, &src, name, opts)?;
+    }
+
     add_file(&mut z, Path::new("README.md"), "README.md", opts)?;
     if Path::new("LICENSE").exists() {
         add_file(&mut z, Path::new("LICENSE"), "LICENSE", opts)?;
     }
 
     // Third-party licence files for the bundled Qualcomm QNN runtime DLLs.
-    // We resolve them from the staged `target/release/` folder if present
-    // (copied there from `.venv\Lib\site-packages\onnxruntime_qnn\`), with
-    // a fallback to the venv itself for fresh checkouts.
-    let venv_qnn = Path::new(".venv/Lib/site-packages/onnxruntime_qnn");
     for (src_name, zip_name) in [
         ("Qualcomm_LICENSE.pdf", "third-party-licenses/Qualcomm_LICENSE.pdf"),
         ("ThirdPartyNotices.txt", "third-party-licenses/ThirdPartyNotices.txt"),

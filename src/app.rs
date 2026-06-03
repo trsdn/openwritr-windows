@@ -138,11 +138,11 @@ fn hotkey_loop(initial: Settings, proxy: EventLoopProxy<UserEvent>, stop: Arc<At
         .iter()
         .map(|m| hotkey::mod_vk_for(m))
         .collect();
-    let mut pressed = false;
+    let mut poll_state = hotkey::PollState::default();
     let mut last_check = Instant::now();
 
     while !stop.load(Ordering::Relaxed) {
-        if let Some(ev) = hotkey::poll_combo(trigger_vk, &mod_vks, &mut pressed) {
+        if let Some(ev) = hotkey::poll_combo(trigger_vk, &mod_vks, &mut poll_state) {
             let user_ev = match ev {
                 hotkey::Event::Press => UserEvent::HotkeyPress,
                 hotkey::Event::Release => {
@@ -171,7 +171,7 @@ fn hotkey_loop(initial: Settings, proxy: EventLoopProxy<UserEvent>, stop: Arc<At
                     new.hotkey_modifiers, new.hotkey_trigger
                 );
                 drop(_mgr.take());
-                pressed = false;
+                poll_state = hotkey::PollState::default();
                 _mgr = hotkey::HotkeyManager::register(&new).ok();
                 trigger_vk = hotkey::trigger_vk_for(&new.hotkey_trigger);
                 mod_vks = new.hotkey_modifiers.iter().map(|m| hotkey::mod_vk_for(m)).collect();

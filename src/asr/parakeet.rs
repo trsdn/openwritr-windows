@@ -11,7 +11,7 @@ use super::tdt::Tdt;
 use crate::asr::Engine;
 use crate::download;
 use anyhow::{anyhow, Context, Result};
-use ndarray::{Array1, Ix3};
+use ndarray::{Array1, Array2, Array3, Axis, Ix3};
 use ort::session::{builder::GraphOptimizationLevel, Session};
 use ort::value::Value;
 use parking_lot::Mutex;
@@ -231,35 +231,14 @@ impl Engine for ParakeetEngine {
 }
 
 impl ParakeetEngine {
-    fn run_pipeline(&self, pcm_16k: &[f32]) -> Result<String> {
-        // The AI-Hub-compiled context binary expects exactly MAX_NPU_SECONDS
-        // of audio (statically baked into the graph). Pad short input with
-        // zeros; truncate long input. Decoder will see blank emissions over
-        // silence — that's fine, the TDT loop terminates on blank tokens.
-        let pcm_npu;
-        let real_len_samples = pcm_16k.len().min((MAX_NPU_SECONDS * 16_000.0) as usize);
-        let pcm_16k: &[f32] = if self.backend == Backend::Npu {
-            let target = (MAX_NPU_SECONDS * 16_000.0) as usize;
-            if pcm_16k.len() >= target {
-                &pcm_16k[..target]
-            } else {
-                let mut buf = pcm_16k.to_vec();
-                buf.resize(target, 0.0);
-                pcm_npu = buf;
-                &pcm_npu
-            }
-        } else {
-            pcm_16k
-        };
-
-        let n = pcm_16k.len();
-        let wave = ndarray::Array2::from_shape_vec((1, n), pcm_16k.to_vec())?;
-        // For NPU: declare the full padded length to the preprocessor so the
-        // mel feature time dimension matches what the encoder was calibrated
-        // for. Decoder will see blank emissions over silence — that's fine.
-        let _ = real_len_samples;
+    /// Preprocess + encode one PCM buffer. For NPU the length must equal
+    /// the compiled window (= MAX_NPU_SECONDS); caller pads. CPU is dynamic
+    /// shape, any length works. Returns encoder_out [1, 1024, T] and valid
+    /// T_out (after clipping to the encoder's reported `encoded_length`).
+    fn preprocess_and_encode(&self, pcm: &[f32]) -> Result<(Array3<f32>, usize)> {
+        let n = pcm.len();
+        let wave = ndarray::Array2::from_shape_vec((1, n), pcm.to_vec())?;
         let wave_len = Array1::<i64>::from_elem(1, n as i64);
-
         let pre_in = ort::inputs![
             "waveforms" => Value::from_array(wave)?,
             "waveforms_lens" => Value::from_array(wave_len)?,
@@ -281,12 +260,6 @@ impl ParakeetEngine {
             (features, features_lens)
         };
 
-        // Encoder runs via two completely different code paths:
-        // - CPU: the standard `ort::Session` route on the istupakov INT8 ONNX.
-        // - NPU: direct C-API FFI into the QNN HTP backend with the AI-Hub
-        //   pre-compiled context binary, because `ort` 2.0-rc.12's session
-        //   builders crash inside QnnHtp when consuming EPContext-wrapper
-        //   ONNX (see src/asr/qnn_ffi.rs).
         let (encoder_out, encoder_lens) = match &self.encoder {
             Encoder::Cpu(sess) => {
                 let mut enc = sess.lock();
@@ -309,8 +282,6 @@ impl ParakeetEngine {
                 (encoder_out, encoder_lens)
             }
             Encoder::Npu(npu) => {
-                // FFI run takes a contiguous ArrayView3<f32> + int32 length.
-                // features arrived as Array3<f32> from the preprocessor.
                 let length_i32 = features_lens.iter().next().copied().unwrap_or(0) as i32;
                 let (out_arr, encoded_len_i32) = npu.run(features.view(), length_i32)?;
                 let encoder_lens = Array1::from_elem(1, encoded_len_i32 as i64).into_dyn();
@@ -318,21 +289,100 @@ impl ParakeetEngine {
             }
         };
 
-        let encoder_out_owned = encoder_out
-            .permuted_axes([0, 2, 1])
-            .as_standard_layout()
-            .to_owned();
-        let t_out = encoder_lens
+        let valid_t = encoder_lens
             .iter()
             .next()
             .copied()
             .map(|v| v as usize)
-            .unwrap_or(encoder_out_owned.dim().1)
-            .min(encoder_out_owned.dim().1);
+            .unwrap_or(encoder_out.dim().2)
+            .min(encoder_out.dim().2);
+        Ok((encoder_out, valid_t))
+    }
 
+    /// Take a single-pass encoder output [1, 1024, T] and run the TDT decoder
+    /// over the first `valid_t` frames.
+    fn decode_features(&self, encoder_out: Array3<f32>, valid_t: usize) -> Result<String> {
+        let permuted = encoder_out
+            .permuted_axes([0, 2, 1])
+            .as_standard_layout()
+            .to_owned();
+        let t_out = valid_t.min(permuted.dim().1);
         let token_ids = {
             let mut dec = self.decoder_joint.lock();
-            self.tdt.decode(&mut dec, &encoder_out_owned, t_out)?
+            self.tdt.decode(&mut dec, &permuted, t_out)?
+        };
+        Ok(self.vocab.detokenize(&token_ids))
+    }
+
+    fn run_pipeline(&self, pcm_16k: &[f32]) -> Result<String> {
+        // NPU window the binary was compiled for (samples + mel-frame stride).
+        let chunk_samples = (MAX_NPU_SECONDS * 16_000.0) as usize;
+        // 1 s of overlap between successive NPU chunks, in audio samples and
+        // in encoder-output frames (encoder downsamples by ~8 → 12 frames/s).
+        let stride_samples = ((MAX_NPU_SECONDS - 1.0) * 16_000.0) as usize;
+        const OVERLAP_FRAMES: usize = 12;
+
+        let is_npu = matches!(self.encoder, Encoder::Npu(_));
+        let n_real = pcm_16k.len();
+
+        // CPU mode: encoder is dynamic-shape, no padding or chunking.
+        if !is_npu {
+            let (encoder_out, valid_t) = self.preprocess_and_encode(pcm_16k)?;
+            return self.decode_features(encoder_out, valid_t);
+        }
+
+        // NPU mode, audio fits in one window: pad with silence to the
+        // compiled length and run once.
+        if n_real <= chunk_samples {
+            let mut padded = pcm_16k.to_vec();
+            padded.resize(chunk_samples, 0.0);
+            let (encoder_out, valid_t) = self.preprocess_and_encode(&padded)?;
+            return self.decode_features(encoder_out, valid_t);
+        }
+
+        // NPU mode, audio longer than the window: slide 8-s windows with 1 s
+        // overlap, stitch the encoder feature streams at the seam (drop the
+        // overlapping 12 leading frames of each non-first chunk), then run
+        // the TDT decoder once over the concatenated features.
+        let mut stitched: Vec<Array2<f32>> = Vec::new();
+        let mut chunk_start = 0usize;
+        let mut chunk_idx = 0usize;
+        loop {
+            let chunk_end_real = (chunk_start + chunk_samples).min(n_real);
+            let mut chunk_pcm = pcm_16k[chunk_start..chunk_end_real].to_vec();
+            chunk_pcm.resize(chunk_samples, 0.0);
+
+            let (encoder_out, valid_t) = self.preprocess_and_encode(&chunk_pcm)?;
+            // [1, 1024, T] → [T, 1024]
+            let permuted = encoder_out
+                .permuted_axes([0, 2, 1])
+                .as_standard_layout()
+                .to_owned();
+            let chunk_frames: Array2<f32> = permuted.slice(ndarray::s![0, .., ..]).to_owned();
+
+            let start_t = if chunk_idx == 0 { 0 } else { OVERLAP_FRAMES };
+            let end_t = valid_t;
+            if start_t < end_t {
+                stitched.push(chunk_frames.slice(ndarray::s![start_t..end_t, ..]).to_owned());
+            }
+
+            if chunk_end_real == n_real { break; }
+            chunk_start += stride_samples;
+            chunk_idx += 1;
+        }
+        info!(chunks = chunk_idx + 1, "NPU chunked encode");
+
+        if stitched.is_empty() {
+            return Ok(String::new());
+        }
+        let views: Vec<_> = stitched.iter().map(|a| a.view()).collect();
+        let final_2d = ndarray::concatenate(Axis(0), &views)
+            .map_err(|e| anyhow!("concat encoder features: {e}"))?;
+        let final_features: Array3<f32> = final_2d.insert_axis(Axis(0));
+        let t_out = final_features.dim().1;
+        let token_ids = {
+            let mut dec = self.decoder_joint.lock();
+            self.tdt.decode(&mut dec, &final_features, t_out)?
         };
         Ok(self.vocab.detokenize(&token_ids))
     }
