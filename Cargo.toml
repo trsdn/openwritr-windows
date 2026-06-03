@@ -6,6 +6,13 @@ description = "Native push-to-talk voice-to-text for Windows on ARM"
 license = "MIT"
 repository = "https://github.com/trsdn/openwritr-windows"
 rust-version = "1.85"
+build = "build.rs"
+
+[build-dependencies]
+# Embeds the app icon (+ version metadata) into openwritr.exe so it shows
+# in the taskbar, Start Menu, Alt-Tab, and Explorer. Windows-only; no-op
+# elsewhere (the build script guards on target_os).
+winresource = "0.1"
 
 [[bin]]
 name = "openwritr"

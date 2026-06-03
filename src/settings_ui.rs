@@ -155,31 +155,60 @@ impl eframe::App for SettingsApp {
                             }
                         }
                     });
+
+                if s.enhance.provider == "github_copilot" {
+                    ui.add_space(4.0);
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing.x = 4.0;
+                        ui.label(egui::RichText::new(
+                            "Uses your existing GitHub Copilot subscription via the gh CLI token."
+                        ).small().color(egui::Color32::from_rgb(154, 163, 178)));
+                        ui.hyperlink_to(
+                            egui::RichText::new("Get GitHub Copilot").small(),
+                            "https://github.com/features/copilot/plans",
+                        );
+                    });
+                }
+
                 ui.add_space(4.0);
                 ui.label("Base URL (OpenAI-compatible only)");
                 if ui.text_edit_singleline(&mut s.enhance.base_url).changed() { self.dirty = true; }
                 ui.label("API key (OpenAI-compatible only)");
                 if ui.add(egui::TextEdit::singleline(&mut s.enhance.api_key).password(true)).changed() { self.dirty = true; }
                 ui.label("Model");
+                // "included" = no premium-request cost on GitHub Copilot plans.
+                // GPT-4.1 and GPT-5 mini are GitHub's included base models;
+                // Claude Haiku consumes premium requests. Included ones first
+                // so the zero-cost default is the obvious pick.
                 let models = [
-                    ("claude-haiku-4.5", "Claude Haiku 4.5"),
-                    ("gpt-5-mini", "GPT-5 Mini"),
-                    ("gpt-4.1", "GPT-4.1"),
+                    ("gpt-4.1", "GPT-4.1  ✓ included", true),
+                    ("gpt-5-mini", "GPT-5 Mini  ✓ included", true),
+                    ("claude-haiku-4.5", "Claude Haiku 4.5  (premium request)", false),
                 ];
                 let current_label = models
                     .iter()
-                    .find(|(k, _)| *k == s.enhance.model)
-                    .map(|(_, v)| *v)
+                    .find(|(k, _, _)| *k == s.enhance.model)
+                    .map(|(_, v, _)| *v)
                     .unwrap_or(s.enhance.model.as_str());
                 egui::ComboBox::from_id_source("enhance_model")
                     .selected_text(current_label)
                     .show_ui(ui, |ui| {
-                        for (k, lbl) in models {
-                            if ui.selectable_value(&mut s.enhance.model, k.to_string(), lbl).changed() {
+                        for (k, lbl, included) in models {
+                            let text = if included {
+                                egui::RichText::new(lbl).color(egui::Color32::from_rgb(34, 197, 94))
+                            } else {
+                                egui::RichText::new(lbl)
+                            };
+                            if ui.selectable_value(&mut s.enhance.model, k.to_string(), text).changed() {
                                 self.dirty = true;
                             }
                         }
                     });
+                ui.add_space(2.0);
+                ui.label(egui::RichText::new(
+                    "\u{2713} included = no premium-request cost on GitHub Copilot. \
+                     Claude Haiku is higher quality but consumes premium requests."
+                ).small().color(egui::Color32::from_rgb(154, 163, 178)));
                 ui.add_space(2.0);
                 ui.label(egui::RichText::new("Or type a custom model name:")
                     .color(egui::Color32::from_rgb(154, 163, 178))
@@ -203,6 +232,22 @@ impl eframe::App for SettingsApp {
                     if ui.button("Close").clicked() {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                     }
+                });
+            });
+
+            // Footer: project link + version.
+            ui.add_space(10.0);
+            ui.separator();
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.hyperlink_to(
+                    egui::RichText::new("\u{2B50} OpenWritr on GitHub").size(12.0),
+                    "https://github.com/trsdn/openwritr-windows",
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(egui::RichText::new(concat!("v", env!("CARGO_PKG_VERSION")))
+                        .small()
+                        .color(egui::Color32::from_rgb(120, 128, 143)));
                 });
             });
         });
