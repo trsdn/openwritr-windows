@@ -8,6 +8,7 @@ mod audio;
 mod download;
 mod enhance;
 mod hotkey;
+mod key_hook;
 mod overlay;
 mod paths;
 mod settings;
@@ -29,6 +30,10 @@ fn main() -> Result<()> {
 
     init_tracing();
     info!("OpenWritr native v{} starting", env!("CARGO_PKG_VERSION"));
+    // Install the global low-level keyboard hook before any subsystem starts
+    // polling for keys. It tracks physical key state across focus changes,
+    // which GetAsyncKeyState cannot.
+    key_hook::install_once();
     app::run()
 }
 

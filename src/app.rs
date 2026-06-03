@@ -138,11 +138,11 @@ fn hotkey_loop(initial: Settings, proxy: EventLoopProxy<UserEvent>, stop: Arc<At
         .iter()
         .map(|m| hotkey::mod_vk_for(m))
         .collect();
-    let mut pressed = false;
+    let mut poll_state = hotkey::PollState::default();
     let mut last_check = Instant::now();
 
     while !stop.load(Ordering::Relaxed) {
-        if let Some(ev) = hotkey::poll_combo(trigger_vk, &mod_vks, &mut pressed) {
+        if let Some(ev) = hotkey::poll_combo(trigger_vk, &mod_vks, &mut poll_state) {
             let user_ev = match ev {
                 hotkey::Event::Press => UserEvent::HotkeyPress,
                 hotkey::Event::Release => {
@@ -171,7 +171,7 @@ fn hotkey_loop(initial: Settings, proxy: EventLoopProxy<UserEvent>, stop: Arc<At
                     new.hotkey_modifiers, new.hotkey_trigger
                 );
                 drop(_mgr.take());
-                pressed = false;
+                poll_state = hotkey::PollState::default();
                 _mgr = hotkey::HotkeyManager::register(&new).ok();
                 trigger_vk = hotkey::trigger_vk_for(&new.hotkey_trigger);
                 mod_vks = new.hotkey_modifiers.iter().map(|m| hotkey::mod_vk_for(m)).collect();
@@ -194,16 +194,24 @@ impl AppHandler {
         self.state.engine_loading.store(true, Ordering::Relaxed);
         let engine_name = self.state.settings.engine.clone();
         let loading_flag = self.state.engine_loading.clone();
-        thread::spawn(move || {
-            match asr::load(&engine_name) {
-                Ok(e) => {
-                    info!("engine loaded: {}", e.label());
-                    STAGED_ENGINE.lock().replace(Arc::from(e));
+        // The default Windows worker-thread stack is 1 MiB. QnnHtp.dll's
+        // EPContext binary loader needs more and triggers
+        // STATUS_STACK_BUFFER_OVERRUN (0xC0000409, /GS cookie corruption
+        // from stack overflow). Give it a generous 32 MiB. Cheap on x64.
+        thread::Builder::new()
+            .name("engine-loader".into())
+            .stack_size(32 * 1024 * 1024)
+            .spawn(move || {
+                match asr::load(&engine_name) {
+                    Ok(e) => {
+                        info!("engine loaded: {}", e.label());
+                        STAGED_ENGINE.lock().replace(Arc::from(e));
+                    }
+                    Err(e) => warn!(error = %e, "engine load failed"),
                 }
-                Err(e) => warn!(error = %e, "engine load failed"),
-            }
-            loading_flag.store(false, Ordering::Relaxed);
-        });
+                loading_flag.store(false, Ordering::Relaxed);
+            })
+            .expect("spawn engine-loader thread");
     }
 }
 
