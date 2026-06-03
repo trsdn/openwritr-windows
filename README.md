@@ -17,13 +17,23 @@ GPT-4.1) or any OpenAI-compatible endpoint.
 
 ## Quick start
 
-1. Download the latest `openwritr-windows-arm64-vX.Y.Z.zip` from
-   [Releases](https://github.com/trsdn/openwritr-windows/releases/latest).
-2. Unzip to `%LOCALAPPDATA%\OpenWritr\app\`.
-3. Run `openwritr.exe`. The first launch downloads the Parakeet model (~670 MB)
-   to `%LOCALAPPDATA%\OpenWritr\models\` — one-time, ~2 minutes on a fast link.
+Two ways to install, both per-user (no admin / UAC required):
 
-A microphone icon appears in your system tray.
+**Installer (recommended).** Download
+`openwritr-windows-arm64-vX.Y.Z-setup.exe` from
+[Releases](https://github.com/trsdn/openwritr-windows/releases/latest)
+and run it. Sets up the Start Menu shortcut, an optional autostart-at-logon
+entry, and a proper uninstaller you'll find under Settings → Apps.
+
+**Portable zip.** Download `openwritr-windows-arm64-vX.Y.Z.zip`, unzip
+into `%LOCALAPPDATA%\OpenWritr\app\`, run `openwritr.exe`. Same binaries,
+no shortcuts, no autostart.
+
+On first launch the Parakeet model is fetched from Hugging Face into
+`%LOCALAPPDATA%\OpenWritr\models\` — one-time, ~1.2 GB on the NPU engine
+(600 MB CPU INT8 + 632 MB QNN HTP context binary), ~2 minutes on a fast
+link. A microphone icon appears in your system tray when the engine is
+ready.
 
 ## Usage
 
