@@ -145,18 +145,59 @@ Open questions for the user:
 - **Mode switching.** Streaming for long-form, offline for short
   push-to-talk — automatic by buffer length? Manual setting?
 
-## What this branch contains so far
+## Phase 1 spike — Windows ARM64 verdict
 
-Nothing yet beyond this design doc. Phase 1 is the gate: we either get
-a clean cache-aware ONNX export or we burn weeks fighting NeMo.
+NeMo cannot be installed on Windows ARM64 directly. Confirmed
+experimentally on this branch:
 
-The path forward is:
-1. Spike Phase 1 — see if `set_export_config({'cache_support': True})`
-   actually produces a runnable ONNX for v3. ~1 day.
-2. If yes, push forward with Phase 2.
-3. If no, file an upstream issue against NeMo and either wait for
-   NVIDIA's upcoming streaming variant or fall back to a working
-   English-only streaming Fast-Conformer.
+| Component | Status |
+|---|---|
+| `torch` 2.12.0+cpu | ✅ installs from `https://download.pytorch.org/whl/cpu` (`cp311-win_arm64`) |
+| `torchaudio` | ❌ **no win_arm64 wheel exists anywhere** (PyPI nor pytorch.org) |
+| `nemo_toolkit[asr]` | ❌ `ctc_segmentation` triggers a NumPy compile from source, which dies on "Broken toolchain: cannot link a simple C program" even with the vcvars-primed MSVC ARM64 shell that builds our Rust code happily |
+
+So Phase 1 cannot proceed in the Windows-native build env.
+
+### Pivot — WSL2 Ubuntu ARM64
+
+Ubuntu ARM64 in WSL2 has full PyPI access, including `torchaudio` and
+all NeMo transitive deps with prebuilt aarch64 wheels. The streaming
+ONNX produced there is fully portable — we'd bring it back to the
+Windows host for HTP compile (AI Hub submission works from anywhere
+with a token) and Rust integration.
+
+**Requires manual user action**: enable Windows Subsystem for Linux,
+which needs admin / UAC. Once available:
+
+```powershell
+# (admin shell, one time)
+wsl --install -d Ubuntu
+
+# (user shell, after WSL+Ubuntu come up)
+wsl
+sudo apt update && sudo apt install -y python3.11 python3.11-venv ffmpeg
+python3.11 -m venv ~/venv-nemo
+source ~/venv-nemo/bin/activate
+pip install --upgrade pip
+pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+pip install nemo_toolkit[asr] onnx onnxruntime huggingface_hub
+```
+
+The NeMo work runs inside WSL. Output `.onnx` files land under
+`/mnt/c/...` so they're directly available to AI Hub scripts on the
+Windows side.
+
+### Path forward
+
+1. **(blocked, user action)** Install WSL2 + Ubuntu ARM64 with admin.
+2. Re-run the Phase 1 spike from inside WSL: NeMo install, .nemo
+   checkpoint download, `set_export_config({'cache_support': True})`
+   + `model.encoder.export(...)`.
+3. If the export produces a runnable ONNX → continue with Phase 2
+   (HTP compile via AI Hub, no WSL required for that step).
+4. If not → file an upstream NeMo issue, fall back to either the
+   English-only streaming Fast-Conformer or wait for NVIDIA's announced
+   upgraded streaming Parakeet variant.
 
 ## Related work
 
