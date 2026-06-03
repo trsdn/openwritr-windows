@@ -187,17 +187,97 @@ The NeMo work runs inside WSL. Output `.onnx` files land under
 `/mnt/c/...` so they're directly available to AI Hub scripts on the
 Windows side.
 
-### Path forward
+### WSL spike — what we ran
 
-1. **(blocked, user action)** Install WSL2 + Ubuntu ARM64 with admin.
-2. Re-run the Phase 1 spike from inside WSL: NeMo install, .nemo
-   checkpoint download, `set_export_config({'cache_support': True})`
-   + `model.encoder.export(...)`.
-3. If the export produces a runnable ONNX → continue with Phase 2
-   (HTP compile via AI Hub, no WSL required for that step).
-4. If not → file an upstream NeMo issue, fall back to either the
-   English-only streaming Fast-Conformer or wait for NVIDIA's announced
-   upgraded streaming Parakeet variant.
+WSL2 + Ubuntu 26.04 aarch64 installed cleanly. NeMo env came up on
+Python 3.14 with prebuilt aarch64 wheels:
+
+| Component | Status |
+|---|---|
+| `torch` 2.12.0, `torchaudio` 2.11.0 | ✅ aarch64 wheels on PyPI (cp314) |
+| `nemo_toolkit[asr]` 2.5.0 | ✅ (after `pip install -U ml_dtypes` to fix an onnx import) |
+| `nvidia/parakeet-tdt-0.6b-v3.nemo` | ✅ restores as `EncDecRNNTBPEModel` + `ConformerEncoder` |
+
+So the Windows-ARM64 blocker is fully solved via WSL. Scripts:
+`scripts/wsl_setup_nemo.sh`, `scripts/wsl_load_parakeet.py`,
+`scripts/wsl_export_streaming.py`.
+
+## Phase 1 verdict — NO-GO for true streaming on v3
+
+Two independent blockers, found by inspecting the restored checkpoint:
+
+### 1. v3 was trained offline (fundamental)
+
+```
+cfg.att_context_size:  [-1, -1]      # full bidirectional attention
+cfg.att_context_style: regular        # NOT chunked_limited
+cfg.self_attention_model: rel_pos
+```
+
+Cache-aware streaming in NeMo only produces correct results for models
+**trained** with `att_context_style: chunked_limited` and a limited
+left/right context. Parakeet TDT v3 was trained full-context. You can
+mechanically force `set_default_att_context_size([70, 13])` (the call
+succeeds), but the encoder never learned to predict from limited
+context — streaming-mode output would diverge from offline and degrade.
+NeMo's own guarantee ("predictions identical in offline and streaming
+mode") explicitly does **not** hold for a regular-style model.
+
+### 2. The export path is also broken on torch 2.12 (mechanical, moot)
+
+Even ignoring #1, `model.encoder.export()` with `cache_support: True`
+fails:
+
+```
+RuntimeError: Failed to convert 'dynamic_axes' to 'dynamic_shapes'.
+ValueError: treespec.unflatten(leaves): leaves has length 6 but the
+            spec refers to a pytree that holds 5 items
+```
+
+torch 2.12's `torch.export` requires `dynamic_shapes`, and NeMo 2.5's
+cache-aware ONNX path still emits the legacy `dynamic_axes` for the
+extra cache tensors. Fixable (provide `dynamic_shapes` by hand, or pin
+an older torch), but not worth it given blocker #1.
+
+## The actual trade-off
+
+True cache-aware streaming models **do** exist — but they're all
+English-only:
+
+| Model | Streaming | Languages | Notes |
+|---|---|---|---|
+| `nvidia/parakeet-tdt-0.6b-v3` (ours) | ❌ offline | **25** | what we ship; chunk-and-stitch on the NPU |
+| `nvidia/nemotron-speech-streaming-en-0.6b` | ✅ cache-aware | English | 80/160/560/1120 ms latency modes |
+| `nvidia/multitalker-parakeet-streaming-0.6b-v1` | ✅ cache-aware | English | `att_context_size` [70,13]=1.12 s default |
+
+No multilingual cache-aware streaming model is published yet. NVIDIA's
+HF discussions say cache-aware multilingual variants are "planned," no
+date.
+
+So the choice is fundamental, not technical:
+
+- **Keep 25 languages** → stay on v3, offline. Our current chunk-and-stitch
+  on the NPU is already the right answer; there's no streaming win to be
+  had without a different model.
+- **Want true sub-second streaming** → adopt an English-only model
+  (nemotron-speech-streaming is the stronger one per its paper). That's a
+  second engine option, not a replacement — English users get streaming,
+  everyone else stays on multilingual offline.
+
+## Recommendation
+
+**Park true streaming until NVIDIA ships a multilingual cache-aware
+model.** Our chunk-and-stitch already keeps long-form latency reasonable
+(44× realtime at 16 s) without sacrificing the 25-language coverage that
+is OpenWritr's whole point.
+
+If sub-second English streaming is independently desirable, that's a
+separate, additive track: wire `nemotron-speech-streaming-en-0.6b` as an
+opt-in "English (streaming)" engine. It reuses all of the Phase 2-4
+plumbing sketched below — and unlike v3 it would actually benefit from it.
+
+Phases 2-4 below stay valid as the integration plan **for whichever
+cache-aware model we adopt** (English now, multilingual when it lands).
 
 ## Related work
 
