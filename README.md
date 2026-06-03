@@ -1,16 +1,19 @@
 # OpenWritr for Windows (ARM64)
 
-[![Windows ARM64](https://img.shields.io/badge/Windows-ARM64-0078D4?logo=windows)](https://github.com/trsdn/openwritr-windows)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Latest release](https://img.shields.io/github/v/release/trsdn/openwritr-windows)](https://github.com/trsdn/openwritr-windows/releases/latest)
+[![Windows 11](https://img.shields.io/badge/Windows-11_24H2-0078D4?logo=windows)](https://github.com/trsdn/openwritr-windows)
+[![Rust](https://img.shields.io/badge/Rust-1.85-DEA584?logo=rust&logoColor=white)](https://www.rust-lang.org)
+[![Snapdragon X Elite](https://img.shields.io/badge/Snapdragon-X_Elite-3253DC?logo=qualcomm&logoColor=white)](https://www.qualcomm.com/products/mobile/snapdragon/pcs-and-tablets/snapdragon-x-elite)
+[![Hexagon NPU](https://img.shields.io/badge/Hexagon-NPU-FF2A00?logo=qualcomm&logoColor=white)](https://huggingface.co/trsdn/parakeet-tdt-0.6b-v3-htp-int8-8s)
+[![Release](https://img.shields.io/github/v/release/trsdn/openwritr-windows)](https://github.com/trsdn/openwritr-windows/releases/latest)
 
 Push-to-talk voice-to-text for **Windows on ARM** (Surface Pro / Snapdragon X
 Elite). Local transcription via **NVIDIA Parakeet TDT 0.6B v3** running on
-the **Hexagon NPU** (or CPU INT8 fallback). 25 languages, ~67 ms per 8-second
-window on the NPU. Optional LLM cleanup via **GitHub Copilot** (Claude Haiku 4.5,
-GPT-5 Mini, GPT-4.1) or any OpenAI-compatible endpoint.
+the **Hexagon NPU**. 25 languages, ~67 ms per 8-second window on the NPU.
+Optional LLM cleanup via **GitHub Copilot** (Claude Haiku 4.5, GPT-5 Mini,
+GPT-4.1) or any OpenAI-compatible endpoint.
 
-Windows port of [trsdn/OpenWritr](https://github.com/trsdn/OpenWritr) (macOS).
+**[Download](https://github.com/trsdn/openwritr-windows/releases/latest)** · **[Releases](https://github.com/trsdn/openwritr-windows/releases)** · **[NPU model on HF](https://huggingface.co/trsdn/parakeet-tdt-0.6b-v3-htp-int8-8s)** · **[macOS sibling](https://github.com/trsdn/OpenWritr)**
 
 ## Quick start
 
