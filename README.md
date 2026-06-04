@@ -33,9 +33,17 @@ System → About. Everything else is x64.
 and run it. Sets up the Start Menu shortcut, an optional autostart-at-logon
 entry, and a proper uninstaller you'll find under Settings → Apps.
 
-**Portable zip.** Download `openwritr-windows-<arch>-vX.Y.Z.zip`, unzip
-into `%LOCALAPPDATA%\OpenWritr\app\`, run `openwritr.exe`. Same binaries,
-no shortcuts, no autostart.
+**Portable zip.** Download `openwritr-windows-<arch>-vX.Y.Z.zip` and unzip
+it into **any folder you like** (e.g. `C:\Tools\OpenWritr\`), then run
+`openwritr.exe`. The app finds its DLLs next to the exe — the install
+location doesn't matter. Same binaries as the installer, just no shortcuts
+and no autostart.
+
+> **Note:** user data (settings, downloaded models, logs) always lives under
+> `%LOCALAPPDATA%\OpenWritr\` — the app creates that folder automatically on
+> first run, you never need to create it yourself. `AppData` is a hidden
+> folder; if you want to look inside, paste `%LOCALAPPDATA%\OpenWritr` into
+> the Explorer address bar.
 
 The x64 build runs Parakeet on the CPU (no Hexagon NPU on Intel/AMD); the
 arm64 build adds the NPU engine. Both share the same multilingual model and
