@@ -49,6 +49,12 @@ The x64 build runs Parakeet on the CPU (no Hexagon NPU on Intel/AMD); the
 arm64 build adds the NPU engine. Both share the same multilingual model and
 UX.
 
+> **Windows SmartScreen warning.** The binaries are not code-signed (yet), so
+> the first launch shows "Windows protected your PC". Click **More info →
+> Run anyway**. To verify your download is authentic, compare its SHA-256
+> against `SHA256SUMS.txt` attached to the release:
+> `Get-FileHash .\openwritr-windows-<arch>-vX.Y.Z-setup.exe` in PowerShell.
+
 On first launch the Parakeet model is fetched from Hugging Face into
 `%LOCALAPPDATA%\OpenWritr\models\` — one-time, ~1.2 GB on the NPU engine
 (600 MB CPU INT8 + 632 MB QNN HTP context binary), ~2 minutes on a fast
