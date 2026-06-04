@@ -72,6 +72,33 @@ def make_base():
     return icon
 
 
+def make_store_assets(base):
+    """Generate the PNG asset set the Microsoft Store / MSIX manifest needs.
+
+    Logos with transparent padding around the badge look better in the Store
+    and on tiles, so each asset renders the badge at ~80% of the canvas.
+    """
+    out_dir = Path(__file__).parent / "store-assets"
+    out_dir.mkdir(exist_ok=True)
+    assets = {
+        # name: (canvas_w, canvas_h)
+        "Square44x44Logo.png":   (44, 44),
+        "Square71x71Logo.png":   (71, 71),
+        "Square150x150Logo.png": (150, 150),
+        "Square310x310Logo.png": (310, 310),
+        "Wide310x150Logo.png":   (310, 150),
+        "StoreLogo.png":         (50, 50),
+        "SplashScreen.png":      (620, 300),
+    }
+    for name, (w, h) in assets.items():
+        canvas = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        side = int(min(w, h) * 0.8)
+        badge = base.resize((side, side), Image.LANCZOS)
+        canvas.paste(badge, ((w - side) // 2, (h - side) // 2), badge)
+        canvas.save(out_dir / name, format="PNG")
+    print(f"wrote {len(assets)} store assets -> {out_dir}")
+
+
 def main():
     base = make_base()
     sizes = [16, 32, 48, 64, 128, 256]
@@ -79,6 +106,7 @@ def main():
     # Also a PNG for README / HF / web use.
     base.save(OUT.with_suffix(".png"), format="PNG")
     print(f"wrote {OUT} ({OUT.stat().st_size} bytes) + {OUT.with_suffix('.png').name}")
+    make_store_assets(base)
 
 
 if __name__ == "__main__":

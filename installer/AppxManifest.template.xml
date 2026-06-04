@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  MSIX manifest template for the Microsoft Store build.
+
+  Placeholders substituted by scripts/build_msix.ps1:
+    {IDENTITY_NAME}   Package/Identity/Name from Partner Center
+    {PUBLISHER}       Package/Identity/Publisher from Partner Center (CN=...)
+    {VERSION}         four-part version, e.g. 0.3.0.0
+    {ARCH}            x64 | arm64
+-->
+<Package
+  xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+  xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+  xmlns:uap5="http://schemas.microsoft.com/appx/manifest/uap/windows10/5"
+  xmlns:desktop="http://schemas.microsoft.com/appx/manifest/desktop/windows10"
+  xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+  IgnorableNamespaces="uap uap5 desktop rescap">
+
+  <Identity
+    Name="{IDENTITY_NAME}"
+    Publisher="{PUBLISHER}"
+    Version="{VERSION}"
+    ProcessorArchitecture="{ARCH}" />
+
+  <Properties>
+    <DisplayName>OpenWritr</DisplayName>
+    <PublisherDisplayName>Torsten Mahr</PublisherDisplayName>
+    <Logo>Assets\StoreLogo.png</Logo>
+    <Description>Push-to-talk voice-to-text. Local transcription with NVIDIA Parakeet — on the Snapdragon Hexagon NPU (ARM64) or CPU (x64). 25 languages, no cloud, no telemetry.</Description>
+  </Properties>
+
+  <Dependencies>
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.22621.0" MaxVersionTested="10.0.26100.0" />
+  </Dependencies>
+
+  <Resources>
+    <Resource Language="en-us" />
+    <Resource Language="de-de" />
+  </Resources>
+
+  <Applications>
+    <Application Id="OpenWritr" Executable="openwritr.exe" EntryPoint="Windows.FullTrustApplication">
+      <uap:VisualElements
+        DisplayName="OpenWritr"
+        Description="Push-to-talk voice-to-text, fully local."
+        BackgroundColor="transparent"
+        Square150x150Logo="Assets\Square150x150Logo.png"
+        Square44x44Logo="Assets\Square44x44Logo.png">
+        <uap:DefaultTile
+          Wide310x150Logo="Assets\Wide310x150Logo.png"
+          Square71x71Logo="Assets\Square71x71Logo.png"
+          Square310x310Logo="Assets\Square310x310Logo.png" />
+        <uap:SplashScreen Image="Assets\SplashScreen.png" />
+      </uap:VisualElements>
+      <Extensions>
+        <!-- Autostart at login. User-toggleable in Task Manager → Startup;
+             Enabled=false by default per Store policy friendliness — the
+             installer's autostart task covered this for the GitHub build,
+             Store users opt in via Settings → Apps → Startup. -->
+        <desktop:Extension Category="windows.startupTask" Executable="openwritr.exe" EntryPoint="Windows.FullTrustApplication">
+          <desktop:StartupTask TaskId="OpenWritrStartup" Enabled="false" DisplayName="OpenWritr" />
+        </desktop:Extension>
+      </Extensions>
+    </Application>
+  </Applications>
+
+  <Capabilities>
+    <rescap:Capability Name="runFullTrust" />
+    <!-- internetClient: first-run model download from Hugging Face + optional
+         Copilot/OpenAI enhance calls. microphone: gates WASAPI capture and
+         lists the app under Settings → Privacy → Microphone. -->
+    <Capability Name="internetClient" />
+    <DeviceCapability Name="microphone" />
+  </Capabilities>
+</Package>
