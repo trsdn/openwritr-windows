@@ -13,7 +13,7 @@ the **Hexagon NPU**. 25 languages, ~67 ms per 8-second window on the NPU.
 Optional LLM cleanup via **GitHub Copilot** (Claude Haiku 4.5, GPT-5 Mini,
 GPT-4.1) or any OpenAI-compatible endpoint.
 
-**[Download](https://github.com/trsdn/openwritr-windows/releases/latest)** · **[Releases](https://github.com/trsdn/openwritr-windows/releases)** · **[NPU model on HF](https://huggingface.co/trsdn/parakeet-tdt-0.6b-v3-htp-int8-8s)** · **[macOS sibling](https://github.com/trsdn/OpenWritr)**
+**[Website](https://trsdn.github.io/openwritr-windows/)** · **[Download](https://github.com/trsdn/openwritr-windows/releases/latest)** · **[Releases](https://github.com/trsdn/openwritr-windows/releases)** · **[NPU model on HF](https://huggingface.co/trsdn/parakeet-tdt-0.6b-v3-htp-int8-8s)** · **[macOS sibling](https://github.com/trsdn/OpenWritr)**
 
 ## Quick start
 
