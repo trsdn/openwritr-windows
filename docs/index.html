@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OpenWritr — local voice-to-text for Windows, on the NPU</title>
+<meta name="description" content="Push-to-talk voice typing for Windows. NVIDIA Parakeet runs locally on the Snapdragon Hexagon NPU (or CPU). 25 languages, no cloud, no telemetry. Open source.">
+<meta property="og:title" content="OpenWritr — local voice-to-text on the NPU">
+<meta property="og:description" content="Push-to-talk dictation for Windows. Parakeet on the Snapdragon Hexagon NPU. 25 languages, fully local, open source.">
+<meta property="og:image" content="https://trsdn.github.io/openwritr-windows/openwritr.png">
+<meta property="og:type" content="website">
+<link rel="icon" href="openwritr.png">
+<style>
+  :root{
+    --bg:#0a0d16; --bg2:#0e1320; --card:#141a28; --line:#222c40;
+    --ink:#e8ecf3; --mut:#9aa3b2; --dim:#6b7383;
+    --blue:#5aa0fa; --blue2:#2563eb; --green:#22c55e;
+    --grad:linear-gradient(135deg,#60a5fa 0%,#2563eb 100%);
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html{scroll-behavior:smooth}
+  body{background:var(--bg);color:var(--ink);
+    font:16px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    -webkit-font-smoothing:antialiased}
+  a{color:var(--blue);text-decoration:none}
+  a:hover{text-decoration:underline}
+  .wrap{max-width:1040px;margin:0 auto;padding:0 24px}
+  section{padding:72px 0;border-top:1px solid var(--line)}
+  h1,h2,h3{line-height:1.2;letter-spacing:-0.02em}
+  h2{font-size:30px;margin-bottom:8px}
+  h2 + .lead{color:var(--mut);font-size:18px;margin-bottom:34px;max-width:680px}
+  code{font-family:"SF Mono",SFMono-Regular,Consolas,"Liberation Mono",monospace;
+    background:#1b2435;border:1px solid var(--line);border-radius:5px;padding:1px 6px;font-size:.88em;color:#cdd6e6}
+
+  /* hero */
+  .hero{padding:96px 0 84px;text-align:center;
+    background:radial-gradient(1100px 520px at 50% -10%,rgba(37,99,235,.28),transparent 70%)}
+  .badge{width:104px;height:104px;border-radius:24px;display:block;margin:0 auto 26px;
+    box-shadow:0 18px 50px rgba(37,99,235,.45)}
+  .hero h1{font-size:54px;font-weight:800;
+    background:linear-gradient(180deg,#fff,#b9c6dc);-webkit-background-clip:text;background-clip:text;color:transparent}
+  .hero .tag{font-size:21px;color:var(--mut);margin:16px auto 0;max-width:600px}
+  .pills{display:flex;gap:10px;justify-content:center;flex-wrap:wrap;margin:26px 0 36px}
+  .pill{background:var(--card);border:1px solid var(--line);border-radius:999px;
+    padding:7px 15px;font-size:13.5px;color:var(--mut)}
+  .pill b{color:var(--ink);font-weight:600}
+  .cta{display:flex;gap:14px;justify-content:center;flex-wrap:wrap}
+  .btn{display:inline-flex;align-items:center;gap:9px;border-radius:11px;padding:13px 24px;
+    font-weight:600;font-size:15px;border:1px solid transparent;transition:transform .12s,box-shadow .12s}
+  .btn:hover{text-decoration:none;transform:translateY(-1px)}
+  .btn-primary{background:var(--grad);color:#fff;box-shadow:0 8px 26px rgba(37,99,235,.4)}
+  .btn-ghost{background:var(--card);border-color:var(--line);color:var(--ink)}
+  .sub{color:var(--dim);font-size:13px;margin-top:16px}
+
+  /* feature grid */
+  .grid{display:grid;grid-template-columns:repeat(3,1fr);gap:18px}
+  .feat{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:24px}
+  .feat .ic{font-size:24px;margin-bottom:12px}
+  .feat h3{font-size:17px;margin-bottom:6px}
+  .feat p{color:var(--mut);font-size:14.5px}
+
+  /* shot */
+  .shot{display:block;width:100%;max-width:820px;margin:0 auto;border-radius:14px;
+    border:1px solid var(--line);box-shadow:0 24px 70px rgba(0,0,0,.5)}
+
+  /* steps */
+  .steps{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;counter-reset:s}
+  .step{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:20px;position:relative}
+  .step::before{counter-increment:s;content:counter(s);
+    display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;border-radius:7px;
+    background:var(--grad);color:#fff;font-size:13px;font-weight:700;margin-bottom:12px}
+  .step h3{font-size:15px;margin-bottom:4px}
+  .step p{color:var(--mut);font-size:13.5px}
+
+  /* perf table */
+  table{width:100%;border-collapse:collapse;background:var(--card);
+    border:1px solid var(--line);border-radius:12px;overflow:hidden}
+  th,td{padding:12px 16px;text-align:left;border-bottom:1px solid var(--line);font-size:14.5px}
+  th{color:var(--mut);font-weight:600;font-size:12.5px;text-transform:uppercase;letter-spacing:.04em}
+  tr:last-child td{border-bottom:none}
+  td b{color:var(--blue)}
+
+  /* deep-dive */
+  .dd{background:var(--bg2);border:1px solid var(--line);border-radius:16px;padding:34px}
+  .dd h3{font-size:18px;margin:22px 0 6px;color:var(--ink)}
+  .dd h3:first-child{margin-top:0}
+  .dd p{color:var(--mut);font-size:15px;margin-bottom:10px}
+  .dd .flow{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:18px 0;
+    font-family:"SF Mono",monospace;font-size:13px}
+  .dd .node{background:var(--card);border:1px solid var(--line);border-radius:9px;padding:9px 13px;color:var(--ink)}
+  .dd .node.npu{border-color:var(--blue2);box-shadow:0 0 0 1px rgba(37,99,235,.4) inset;color:#cfe0ff}
+  .dd .arr{color:var(--dim)}
+
+  /* dl cards */
+  .dls{display:grid;grid-template-columns:repeat(2,1fr);gap:18px}
+  .dl{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:24px}
+  .dl h3{font-size:18px;margin-bottom:4px}
+  .dl .for{color:var(--dim);font-size:13px;margin-bottom:16px}
+  .dl .lk{display:block;margin-top:8px;font-size:14.5px}
+
+  footer{border-top:1px solid var(--line);padding:40px 0 60px;color:var(--dim);font-size:14px;text-align:center}
+  footer a{color:var(--mut)}
+  .links{display:flex;gap:22px;justify-content:center;flex-wrap:wrap;margin-bottom:18px}
+
+  @media(max-width:780px){
+    .grid,.steps,.dls{grid-template-columns:1fr}
+    .hero h1{font-size:40px}
+    section{padding:54px 0}
+  }
+</style>
+</head>
+<body>
+
+<header class="hero">
+  <div class="wrap">
+    <img class="badge" src="openwritr.png" alt="OpenWritr icon">
+    <h1>OpenWritr</h1>
+    <p class="tag">Push-to-talk voice typing for Windows. Hold a key, speak, release — your words land at the cursor. Fully local, on the NPU.</p>
+    <div class="pills">
+      <span class="pill">🔒 <b>100% local</b> — no cloud, no telemetry</span>
+      <span class="pill">⚡ <b>Hexagon NPU</b> accelerated</span>
+      <span class="pill">🌍 <b>25 languages</b></span>
+      <span class="pill">🦀 native Rust · <b>~7 MB</b></span>
+    </div>
+    <div class="cta">
+      <a class="btn btn-primary" href="https://github.com/trsdn/openwritr-windows/releases/latest">↓ Download for Windows</a>
+      <a class="btn btn-ghost" href="https://github.com/trsdn/openwritr-windows">★ View on GitHub</a>
+    </div>
+    <p class="sub">Snapdragon X (ARM64) &nbsp;·&nbsp; Intel / AMD (x64) &nbsp;·&nbsp; MIT licensed</p>
+  </div>
+</header>
+
+<section>
+  <div class="wrap">
+    <h2>Dictate into anything</h2>
+    <p class="lead">OpenWritr isn't an app you switch to — it's a tray utility that types for you, into whatever window already has focus. Email, chat, your editor, a browser field. Hold the hotkey, talk, let go.</p>
+    <div class="grid">
+      <div class="feat"><div class="ic">🔒</div><h3>Private by design</h3><p>Speech recognition runs on your device. Your audio never leaves the machine. No account, no analytics, nothing phoned home.</p></div>
+      <div class="feat"><div class="ic">⚡</div><h3>NPU-fast</h3><p>On Snapdragon X the model runs on the Hexagon NPU — a 5-second sentence transcribes in well under half a second, sipping power.</p></div>
+      <div class="feat"><div class="ic">🌍</div><h3>25 languages</h3><p>English, German, French, Spanish, Italian, Dutch, Polish, Ukrainian and more — auto-detected, with punctuation and capitalization.</p></div>
+      <div class="feat"><div class="ic">⌨️</div><h3>Focus-proof hotkey</h3><p>A global low-level keyboard hook means recording survives popups, UAC prompts and system shortcuts stealing focus mid-sentence.</p></div>
+      <div class="feat"><div class="ic">✨</div><h3>Optional AI cleanup</h3><p>Hold Shift too and an LLM tidies punctuation and grammar — via your own GitHub Copilot or OpenAI-compatible key. Off by default.</p></div>
+      <div class="feat"><div class="ic">🧩</div><h3>Open source</h3><p>MIT-licensed, native Rust, no Electron. A single ~7 MB executable. Every release built reproducibly in public CI.</p></div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>Clean, out of the way</h2>
+    <p class="lead">A subtle overlay with a live level meter appears only while you record. Everything else is one tray icon and a settings dialog.</p>
+    <img class="shot" src="screenshot-settings.png" alt="OpenWritr settings window">
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>How it works</h2>
+    <p class="lead">Press → speak → release. Four stages, all on your machine.</p>
+    <div class="steps">
+      <div class="step"><h3>Hold the hotkey</h3><p>Default Ctrl+Win. A global hook captures the keystroke no matter what's focused; the mic opens.</p></div>
+      <div class="step"><h3>Speak</h3><p>Audio is downmixed to 16 kHz mono and turned into mel features — locally, in real time.</p></div>
+      <div class="step"><h3>Release</h3><p>The Parakeet encoder runs on the NPU (or CPU); a transducer decoder turns features into text.</p></div>
+      <div class="step"><h3>Text appears</h3><p>The result is pasted at your cursor. Optionally polished by an LLM first.</p></div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>Getting Parakeet onto the Hexagon NPU</h2>
+    <p class="lead">The interesting engineering. NVIDIA's Parakeet is a great speech model — but nothing about it was built to run on a Qualcomm NPU. Here's what it took.</p>
+    <div class="dd">
+      <div class="flow">
+        <span class="node">mel preprocessor</span><span class="arr">→</span>
+        <span class="node npu">encoder · Hexagon NPU</span><span class="arr">→</span>
+        <span class="node">TDT decoder</span><span class="arr">→</span>
+        <span class="node">text</span>
+      </div>
+
+      <h3>1 · The shape problem</h3>
+      <p>Parakeet's encoder builds its attention mask dynamically at runtime (<code>Shape → Gather → Range → Expand</code>). The Hexagon HTP backend can't trace through that — it bails out every time. We constant-folded that subgraph against a fixed 8-second audio window, freezing the input shapes so the whole graph becomes static and compilable.</p>
+
+      <h3>2 · Quantization</h3>
+      <p>The 600M-parameter encoder was quantized to <b>INT8 weights / INT16 activations</b> — the recipe the HTP wants for transformer-style nets — calibrated on real multilingual speech (FLEURS), then compiled to a Qualcomm AI Hub QNN context binary targeting the Snapdragon X Elite.</p>
+
+      <h3>3 · Loading it from Rust</h3>
+      <p>The compiled binary loads through ONNX Runtime's QNN execution provider. The high-level Rust bindings crashed on this particular model, so OpenWritr calls the ONNX Runtime C API directly through a thin FFI layer — the exact call sequence that works from Python, reproduced in native Rust.</p>
+
+      <h3>4 · Long-form audio</h3>
+      <p>The compiled encoder takes a fixed 8-second window. Longer dictation is run in overlapping chunks and the encoder features are stitched back together at the seams, so the decoder runs once over the whole stream — no doubled or dropped words at the boundaries.</p>
+
+      <p style="margin-top:22px">The result is published as an open model on Hugging Face, and the entire toolchain (graph surgery, AI Hub submission, wrapper, validator) ships in the repo.</p>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>Performance</h2>
+    <p class="lead">Measured on a Snapdragon X Elite (X1E80100). Decode is the full pipeline: preprocess + encode + transducer decode.</p>
+    <table>
+      <tr><th>Audio length</th><th>Decode time</th><th>× Realtime</th><th>NPU chunks</th></tr>
+      <tr><td>3 s</td><td>128 ms</td><td><b>23×</b></td><td>1</td></tr>
+      <tr><td>5.8 s</td><td>221 ms</td><td><b>26×</b></td><td>1</td></tr>
+      <tr><td>16.4 s</td><td>375 ms</td><td><b>44×</b></td><td>3</td></tr>
+      <tr><td>23.0 s</td><td>626 ms</td><td><b>37×</b></td><td>4</td></tr>
+    </table>
+    <p class="sub">The encoder itself runs in ~67 ms per 8-second window on the NPU. The x64 build runs the same pipeline on the CPU at roughly 25× realtime.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>Download</h2>
+    <p class="lead">Pick the build for your CPU — both are per-user installs, no admin needed. Not sure? Settings → System → About → "System type".</p>
+    <div class="dls">
+      <div class="dl">
+        <h3>Snapdragon X · ARM64</h3>
+        <div class="for">Surface Pro 11, Surface Laptop 7, and other Copilot+ PCs — runs on the Hexagon NPU</div>
+        <a class="btn btn-primary" href="https://github.com/trsdn/openwritr-windows/releases/latest">↓ arm64 installer</a>
+      </div>
+      <div class="dl">
+        <h3>Intel / AMD · x64</h3>
+        <div class="for">Most other Windows laptops and desktops — runs on the CPU</div>
+        <a class="btn btn-primary" href="https://github.com/trsdn/openwritr-windows/releases/latest">↓ x64 installer</a>
+      </div>
+    </div>
+    <p class="sub">Binaries aren't code-signed yet, so Windows SmartScreen shows a warning on first launch — click <b>More info → Run anyway</b>. Microsoft Store listing is on the way. Checksums are attached to every release.</p>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <div class="links">
+      <a href="https://github.com/trsdn/openwritr-windows">GitHub repo</a>
+      <a href="https://github.com/trsdn/openwritr-windows/blob/main/docs/OVERVIEW.md">Architecture</a>
+      <a href="https://huggingface.co/trsdn/parakeet-tdt-0.6b-v3-htp-int8-8s">NPU model (Hugging Face)</a>
+      <a href="https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3">Base model (NVIDIA)</a>
+      <a href="https://github.com/trsdn/OpenWritr">macOS version</a>
+    </div>
+    <p>MIT licensed. Speech model: NVIDIA Parakeet TDT 0.6B v3 (CC-BY-4.0). NPU build compiled via Qualcomm AI Hub.<br>OpenWritr is an independent open-source project, not affiliated with NVIDIA, Qualcomm or Microsoft.</p>
+  </div>
+</footer>
+
+</body>
+</html>
