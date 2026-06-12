@@ -13,11 +13,16 @@ the **Hexagon NPU**. 25 languages, ~67 ms per 8-second window on the NPU.
 Optional LLM cleanup via **GitHub Copilot** (Claude Haiku 4.5, GPT-5 Mini,
 GPT-4.1) or any OpenAI-compatible endpoint.
 
-**[Website](https://trsdn.github.io/openwritr-windows/)** · **[Download](https://github.com/trsdn/openwritr-windows/releases/latest)** · **[Releases](https://github.com/trsdn/openwritr-windows/releases)** · **[NPU model on HF](https://huggingface.co/trsdn/parakeet-tdt-0.6b-v3-htp-int8-8s)** · **[macOS sibling](https://github.com/trsdn/OpenWritr)**
+**[Microsoft Store](https://apps.microsoft.com/detail/9MSQWR701P2Q)** · **[Website](https://trsdn.github.io/openwritr-windows/)** · **[Releases](https://github.com/trsdn/openwritr-windows/releases)** · **[NPU model on HF](https://huggingface.co/trsdn/parakeet-tdt-0.6b-v3-htp-int8-8s)** · **[macOS sibling](https://github.com/trsdn/OpenWritr)**
 
 ## Quick start
 
-Pick the build for your CPU, both per-user (no admin / UAC required):
+**Easiest: [get it from the Microsoft Store](https://apps.microsoft.com/detail/9MSQWR701P2Q).**
+One click, it installs the right build for your CPU automatically, keeps
+itself updated, and there's no SmartScreen warning.
+
+Prefer a direct download? Pick the build for your CPU, both per-user (no
+admin / UAC required):
 
 | Your machine | Build | Engine |
 |---|---|---|
@@ -27,7 +32,7 @@ Pick the build for your CPU, both per-user (no admin / UAC required):
 Not sure? Snapdragon laptops report "ARM-based processor" in Settings →
 System → About. Everything else is x64.
 
-**Installer (recommended).** Download
+**Installer.** Download
 `openwritr-windows-<arch>-vX.Y.Z-setup.exe` from
 [Releases](https://github.com/trsdn/openwritr-windows/releases/latest)
 and run it. Sets up the Start Menu shortcut, an optional autostart-at-logon
