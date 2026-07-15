@@ -7,10 +7,13 @@
 ; runs this automatically as part of the release flow.
 
 #define AppName       "OpenWritr"
-#define AppVersion    "0.3.0"
+#ifndef AppVersion
+#define AppVersion    "0.4.0"
+#endif
 #define AppPublisher  "Torsten Mahr"
 #define AppURL        "https://github.com/trsdn/openwritr-windows"
 #define AppExeName    "openwritr.exe"
+#define SrcDir        "..\target\stage\arm64"
 
 [Setup]
 AppId={{2A8F4D3E-7C61-4B9F-A52B-3D7E0F88D911}
@@ -61,30 +64,9 @@ Name: "desktopicon"; \
       Flags: unchecked
 
 [Files]
-; All exe + DLLs + skel + cat files staged in target/release by `cargo run --bin package`.
-Source: "..\target\release\openwritr.exe";                  DestDir: "{app}"; Flags: ignoreversion
-Source: "..\target\release\onnxruntime.dll";                DestDir: "{app}"; Flags: ignoreversion
-Source: "..\target\release\onnxruntime_providers_qnn.dll";  DestDir: "{app}"; Flags: ignoreversion
-Source: "..\target\release\QnnHtp.dll";                     DestDir: "{app}"; Flags: ignoreversion
-Source: "..\target\release\QnnHtpPrepare.dll";              DestDir: "{app}"; Flags: ignoreversion
-Source: "..\target\release\QnnHtpV73Stub.dll";              DestDir: "{app}"; Flags: ignoreversion
-Source: "..\target\release\QnnHtpV81Stub.dll";              DestDir: "{app}"; Flags: ignoreversion
-Source: "..\target\release\libQnnHtpV73Skel.so";            DestDir: "{app}"; Flags: ignoreversion
-Source: "..\target\release\libQnnHtpV81Skel.so";            DestDir: "{app}"; Flags: ignoreversion
-Source: "..\target\release\libqnnhtpv73.cat";               DestDir: "{app}"; Flags: ignoreversion
-Source: "..\target\release\libqnnhtpv81.cat";               DestDir: "{app}"; Flags: ignoreversion
-Source: "..\target\release\QnnSystem.dll";                  DestDir: "{app}"; Flags: ignoreversion
-Source: "..\target\release\QnnCpu.dll";                     DestDir: "{app}"; Flags: ignoreversion
-Source: "..\target\release\QnnGpu.dll";                     DestDir: "{app}"; Flags: ignoreversion
-Source: "..\target\release\QnnIr.dll";                      DestDir: "{app}"; Flags: ignoreversion
-Source: "..\target\release\Genie.dll";                      DestDir: "{app}"; Flags: ignoreversion
-Source: "..\README.md";                                     DestDir: "{app}"; Flags: ignoreversion
-Source: "..\LICENSE";                                       DestDir: "{app}"; Flags: ignoreversion
-; Third-party license files (fed from the venv where they live alongside the DLLs).
-Source: "..\.venv\Lib\site-packages\onnxruntime_qnn\Qualcomm_LICENSE.pdf";  DestDir: "{app}\third-party-licenses"; DestName: "Qualcomm_LICENSE.pdf";           Flags: ignoreversion
-Source: "..\.venv\Lib\site-packages\onnxruntime_qnn\ThirdPartyNotices.txt"; DestDir: "{app}\third-party-licenses"; DestName: "ThirdPartyNotices.txt";          Flags: ignoreversion
-Source: "..\.venv\Lib\site-packages\onnxruntime_qnn\LICENSE";               DestDir: "{app}\third-party-licenses"; DestName: "onnxruntime-qnn-LICENSE.txt";   Flags: ignoreversion
-Source: "..\.venv\Lib\site-packages\onnxruntime_qnn\Privacy.md";            DestDir: "{app}\third-party-licenses"; DestName: "onnxruntime-qnn-Privacy.md";    Flags: ignoreversion
+; scripts/prepare_release.py creates this directory from release-manifest.json
+; and fails before Inno starts if any required runtime file is absent or invalid.
+Source: "{#SrcDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{group}\{#AppName}";       Filename: "{app}\{#AppExeName}"; Tasks: startmenuicon

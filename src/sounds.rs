@@ -7,14 +7,18 @@ use std::io::Write;
 use std::path::PathBuf;
 
 use windows::core::PCSTR;
-use windows::Win32::Media::Audio::{PlaySoundA, SND_ASYNC, SND_FILENAME, SND_NODEFAULT, SND_NOSTOP};
+use windows::Win32::Media::Audio::{
+    PlaySoundA, SND_ASYNC, SND_FILENAME, SND_NODEFAULT, SND_NOSTOP,
+};
 
 const SR: u32 = 44_100;
 
 static START_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
 static STOP_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
 
-fn temp_dir() -> PathBuf { std::env::temp_dir().join("openwritr-cues") }
+fn temp_dir() -> PathBuf {
+    std::env::temp_dir().join("openwritr-cues")
+}
 
 fn render_tone(freq: f32, duration_s: f32) -> Vec<i16> {
     let n = (SR as f32 * duration_s) as usize;
@@ -32,7 +36,9 @@ fn render_tone(freq: f32, duration_s: f32) -> Vec<i16> {
         }
         let attack = if i < attack_n {
             0.5 - 0.5 * (std::f32::consts::PI * i as f32 / attack_n as f32).cos()
-        } else { 1.0 };
+        } else {
+            1.0
+        };
         let decay = (-t / (duration_s * 0.32)).exp();
         let s = body * attack * decay * 0.18;
         out.push((s.clamp(-1.0, 1.0) * 32767.0) as i16);
@@ -49,13 +55,13 @@ fn write_wav(path: &PathBuf, samples: &[i16]) -> std::io::Result<()> {
     f.write_all(&total.to_le_bytes())?;
     f.write_all(b"WAVE")?;
     f.write_all(b"fmt ")?;
-    f.write_all(&16u32.to_le_bytes())?;     // chunk size
-    f.write_all(&1u16.to_le_bytes())?;      // PCM
-    f.write_all(&1u16.to_le_bytes())?;      // mono
+    f.write_all(&16u32.to_le_bytes())?; // chunk size
+    f.write_all(&1u16.to_le_bytes())?; // PCM
+    f.write_all(&1u16.to_le_bytes())?; // mono
     f.write_all(&SR.to_le_bytes())?;
-    f.write_all(&(SR * 2).to_le_bytes())?;  // byte rate
-    f.write_all(&2u16.to_le_bytes())?;      // block align
-    f.write_all(&16u16.to_le_bytes())?;     // bits per sample
+    f.write_all(&(SR * 2).to_le_bytes())?; // byte rate
+    f.write_all(&2u16.to_le_bytes())?; // block align
+    f.write_all(&16u16.to_le_bytes())?; // bits per sample
     f.write_all(b"data")?;
     f.write_all(&data_size.to_le_bytes())?;
     for s in samples {
@@ -67,7 +73,9 @@ fn write_wav(path: &PathBuf, samples: &[i16]) -> std::io::Result<()> {
 fn ensure(path_slot: &Mutex<Option<PathBuf>>, name: &str, freq: f32) -> Option<PathBuf> {
     let mut slot = path_slot.lock();
     if let Some(p) = slot.as_ref() {
-        if p.exists() { return Some(p.clone()); }
+        if p.exists() {
+            return Some(p.clone());
+        }
     }
     let dir = temp_dir();
     std::fs::create_dir_all(&dir).ok()?;

@@ -7,11 +7,13 @@
 ;   "%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe" /Qp installer\openwritr-x64.iss
 
 #define AppName       "OpenWritr"
-#define AppVersion    "0.3.0"
+#ifndef AppVersion
+#define AppVersion    "0.4.0"
+#endif
 #define AppPublisher  "Torsten Mahr"
 #define AppURL        "https://github.com/trsdn/openwritr-windows"
 #define AppExeName    "openwritr.exe"
-#define SrcDir        "..\target\x86_64-pc-windows-msvc\release"
+#define SrcDir        "..\target\stage\x64"
 
 [Setup]
 AppId={{7F3C1A92-5E84-4D17-B6A9-1C2E4F77A083}
@@ -56,13 +58,8 @@ Name: "startmenuicon"; Description: "Create a Start Menu shortcut"; GroupDescrip
 Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Shortcuts:"; Flags: unchecked
 
 [Files]
-Source: "{#SrcDir}\openwritr.exe"; DestDir: "{app}"; Flags: ignoreversion
-; CPU build of onnxruntime, vendored from the win_amd64 wheel (see
-; scripts/fetch_x64_ort.py). No QNN/Hexagon DLLs on Intel.
-Source: "..\vendor\x64\onnxruntime.dll"; DestDir: "{app}"; Flags: ignoreversion
-Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion
-Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
-Source: "..\.venv\Lib\site-packages\onnxruntime_qnn\ThirdPartyNotices.txt"; DestDir: "{app}\third-party-licenses"; DestName: "ThirdPartyNotices.txt"; Flags: ignoreversion skipifsourcedoesntexist
+; The canonical release stage contains no Qualcomm-only files on x64.
+Source: "{#SrcDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExeName}"; Tasks: startmenuicon

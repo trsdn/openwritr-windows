@@ -1,6 +1,6 @@
 [package]
 name = "openwritr"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 description = "Native push-to-talk voice-to-text for Windows on ARM"
 license = "MIT"
@@ -40,12 +40,15 @@ enigo = "0.6"
 # Packaging
 zip = { version = "2", default-features = false, features = ["deflate"] }
 
-# ASR — ONNX Runtime via dynamic loading (shared DLLs with Python ORT)
-# api-22 unlocks register_ep_library + with_auto_device for native NPU.
+# ASR — ONNX Runtime via dynamic loading.
+# api-24 requires native ORT >= 1.24; the exact DLL tuple is pinned in
+# runtime-manifest.json and shared by every engine in the process.
 ort = { version = "=2.0.0-rc.12", default-features = false, features = ["load-dynamic", "ndarray", "std", "api-24"] }
 ndarray = "0.17"
-hf-hub = { version = "0.4", default-features = false, features = ["rustls-tls", "ureq"] }
 sentencepiece = "0.11"
+sha2 = "0.10"
+half = "2.7"
+tokenizers = { version = "=0.21.4", default-features = false, features = ["fancy-regex"] }
 
 # Audio preprocessing
 rubato = "0.16"
@@ -53,7 +56,7 @@ realfft = "3"
 
 # HTTP for enhance (Copilot / OpenAI)
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
-keyring = "3"
+keyring = { version = "3", default-features = false, features = ["windows-native"] }
 
 # Image / icon helpers
 image = { version = "0.25", default-features = false, features = ["png"] }
@@ -65,6 +68,7 @@ anyhow = "1"
 thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
 directories = "5"
 parking_lot = "0.12"
 once_cell = "1"
@@ -75,6 +79,7 @@ windows = { version = "0.62", features = [
     "Win32_System_Com",
     "Win32_System_Console",
     "Win32_System_LibraryLoader",
+    "Win32_System_Registry",
     "Win32_UI_WindowsAndMessaging",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_Graphics_Dwm",
@@ -82,7 +87,16 @@ windows = { version = "0.62", features = [
     "Win32_UI_Shell",
     "Win32_Media_Audio",
 ] }
-windows-sys = { version = "0.59", features = ["Win32_Foundation"] }
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_DataExchange",
+    "Win32_System_Threading",
+] }
+
+[dev-dependencies]
+tempfile = "3"
 
 [profile.release]
 opt-level = 3

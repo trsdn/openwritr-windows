@@ -1,0 +1,167 @@
+{
+  "schema_version": 1,
+  "rust_ort": {
+    "crate_version": "2.0.0-rc.12",
+    "api_version": 24,
+    "minimum_native_onnxruntime": "1.24.0"
+  },
+  "qnn": {
+    "package_version": "2.1.1",
+    "qairt_version": "2.45.41",
+    "ai_hub_compile_version": "2.45"
+  },
+  "compatibility": {
+    "status": "hardware-validation-required",
+    "reason": "The supported QNN package pins ONNX Runtime 1.24.4, while Qualcomm's Whisper v0.57.3 precompiled QNN ONNX export records ONNX Runtime 1.25.0. Do not mix the 2.1.1 QNN plugin with 1.25.0 using --no-deps; validate the 1.24.4 runtime against the Whisper context on Snapdragon X Elite.",
+    "whisper_model": "qualcomm/Whisper-Large-V3-Turbo",
+    "whisper_release": "v0.57.3",
+    "target_hardware": "Snapdragon X Elite"
+  },
+  "architectures": {
+    "arm64": {
+      "default_output": "target/release",
+      "packages": [
+        {
+          "name": "onnxruntime",
+          "version": "1.24.4",
+          "wheel": "onnxruntime-1.24.4-cp311-cp311-win_arm64.whl",
+          "url": "https://files.pythonhosted.org/packages/32/84/4155fcd362e8873eb6ce305acfeeadacd9e0e59415adac474bea3d9281bb/onnxruntime-1.24.4-cp311-cp311-win_arm64.whl",
+          "sha256": "e26478356dba25631fb3f20112e345f8e8bf62c499bb497e8a559f7d69cf7e7b",
+          "files": [
+            {
+              "source": "onnxruntime/capi/onnxruntime.dll",
+              "target": "onnxruntime.dll",
+              "required": true
+            },
+            {
+              "source": "onnxruntime/LICENSE",
+              "target": "third-party-licenses/onnxruntime-LICENSE.txt",
+              "required": true
+            },
+            {
+              "source": "onnxruntime/ThirdPartyNotices.txt",
+              "target": "third-party-licenses/onnxruntime-ThirdPartyNotices.txt",
+              "required": true
+            },
+            {
+              "source": "onnxruntime/Privacy.md",
+              "target": "third-party-licenses/onnxruntime-Privacy.md",
+              "required": true
+            }
+          ]
+        },
+        {
+          "name": "onnxruntime-qnn",
+          "version": "2.1.1",
+          "wheel": "onnxruntime_qnn-2.1.1-cp311-cp311-win_arm64.whl",
+          "url": "https://files.pythonhosted.org/packages/e5/5e/78d341d69171eca6404dc355d20f9942a2a226d6d9e9653924bc1b6859b0/onnxruntime_qnn-2.1.1-cp311-cp311-win_arm64.whl",
+          "sha256": "13aad6abad2e52f75299417d8682d0e1df99283ac3a7d56f146565f51f8599b2",
+          "files": [
+            {
+              "source": "onnxruntime_qnn/onnxruntime_providers_qnn.dll",
+              "target": "onnxruntime_providers_qnn.dll",
+              "required": true
+            },
+            {
+              "source": "onnxruntime_qnn/QnnHtp.dll",
+              "target": "QnnHtp.dll",
+              "required": true
+            },
+            {
+              "source": "onnxruntime_qnn/QnnHtpPrepare.dll",
+              "target": "QnnHtpPrepare.dll",
+              "required": true
+            },
+            {
+              "source": "onnxruntime_qnn/QnnHtpNetRunExtensions.dll",
+              "target": "QnnHtpNetRunExtensions.dll",
+              "required": true
+            },
+            {
+              "source": "onnxruntime_qnn/QnnHtpV73Stub.dll",
+              "target": "QnnHtpV73Stub.dll",
+              "required": true
+            },
+            {
+              "source": "onnxruntime_qnn/libQnnHtpV73Skel.so",
+              "target": "libQnnHtpV73Skel.so",
+              "required": true
+            },
+            {
+              "source": "onnxruntime_qnn/libqnnhtpv73.cat",
+              "target": "libqnnhtpv73.cat",
+              "required": true
+            },
+            {
+              "source": "onnxruntime_qnn/QnnSystem.dll",
+              "target": "QnnSystem.dll",
+              "required": true
+            },
+            {
+              "source": "onnxruntime_qnn/LICENSE",
+              "target": "third-party-licenses/onnxruntime-qnn-LICENSE.txt",
+              "required": true
+            },
+            {
+              "source": "onnxruntime_qnn/ThirdPartyNotices.txt",
+              "target": "third-party-licenses/onnxruntime-qnn-ThirdPartyNotices.txt",
+              "required": true
+            },
+            {
+              "source": "onnxruntime_qnn/Privacy.md",
+              "target": "third-party-licenses/onnxruntime-qnn-Privacy.md",
+              "required": true
+            },
+            {
+              "source": "onnxruntime_qnn/Qualcomm_LICENSE.pdf",
+              "target": "third-party-licenses/Qualcomm_LICENSE.pdf",
+              "required": true
+            }
+          ]
+        }
+      ]
+    },
+    "x64": {
+      "default_output": "vendor/x64",
+      "packages": [
+        {
+          "name": "onnxruntime",
+          "version": "1.24.4",
+          "wheel": "onnxruntime-1.24.4-cp311-cp311-win_amd64.whl",
+          "url": "https://files.pythonhosted.org/packages/dd/59/8febe015f391aa1757fa5ba82c759ea4b6c14ef970132efb5e316665ba61/onnxruntime-1.24.4-cp311-cp311-win_amd64.whl",
+          "sha256": "b43b63eb24a2bc8fc77a09be67587a570967a412cccb837b6245ccb546691153",
+          "files": [
+            {
+              "source": "onnxruntime/capi/onnxruntime.dll",
+              "target": "onnxruntime.dll",
+              "required": true
+            },
+            {
+              "source": "onnxruntime/LICENSE",
+              "target": "third-party-licenses/onnxruntime-LICENSE.txt",
+              "required": true
+            },
+            {
+              "source": "onnxruntime/ThirdPartyNotices.txt",
+              "target": "third-party-licenses/onnxruntime-ThirdPartyNotices.txt",
+              "required": true
+            },
+            {
+              "source": "onnxruntime/Privacy.md",
+              "target": "third-party-licenses/onnxruntime-Privacy.md",
+              "required": true
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "sources": [
+    "https://github.com/pykeio/ort/releases/tag/v2.0.0-rc.12",
+    "https://pypi.org/project/onnxruntime/1.24.4/",
+    "https://pypi.org/project/onnxruntime-qnn/2.1.1/",
+    "https://github.com/onnxruntime/onnxruntime-qnn/releases/tag/v2.1.1",
+    "https://huggingface.co/qualcomm/Whisper-Large-V3-Turbo",
+    "https://workbench.aihub.qualcomm.com/docs/hub/api.html"
+  ]
+}

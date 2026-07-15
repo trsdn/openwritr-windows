@@ -7,11 +7,16 @@
 //! over a crossbeam-style channel into the winit loop, which translates
 //! them into recorder/tray/engine actions.
 
-use crate::overlay;
-use crate::{asr, audio::Recorder, enhance, hotkey, paths, settings::Settings, sounds, tray};
+use crate::{
+    audio::Recorder,
+    diagnostics, hotkey, key_hook,
+    model_manager::ModelState,
+    overlay, paste, paths,
+    settings::{CredentialHealth, Settings},
+    sounds, tray,
+    worker::{ShutdownMode, Worker, WorkerEvent},
+};
 use anyhow::Result;
-use arboard::Clipboard;
-use enigo::{Direction, Enigo, Key, Keyboard, Settings as EnigoSettings};
 use std::os::windows::process::CommandExt;
 use std::process::Stdio;
 use std::sync::{
@@ -27,11 +32,12 @@ use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::window::WindowId;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum UserEvent {
     HotkeyPress,
     HotkeyRelease { enhance: bool },
-    TranscribeDone,
+    DiagnosticsExported,
+    DiagnosticsExportFailed(String),
     Tick,
 }
 
@@ -39,46 +45,106 @@ pub enum UserEvent {
 const DETACHED_PROCESS: u32 = 0x0000_0008;
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
+enum EngineState {
+    NotStarted,
+    Loading,
+    Ready { label: String },
+    Failed { error: String },
+}
+
 struct State {
     settings: Settings,
+    credential_health: CredentialHealth,
+    settings_error: Option<String>,
     recorder: Recorder,
     tray: tray::Tray,
+    overlay: overlay::OverlayController,
     record_started: Option<Instant>,
-    engine: Option<Arc<dyn asr::Engine>>,
-    engine_loading: Arc<AtomicBool>,
+    worker: Worker,
+    engine_state: EngineState,
+    model_state: Option<ModelState>,
+    load_generation: u64,
+    pending_jobs: usize,
+    active_job: Option<u64>,
+    shutting_down: bool,
     hk_stop: Arc<AtomicBool>,
+    proxy: EventLoopProxy<UserEvent>,
+    diagnostics_exporting: bool,
 }
 
 pub fn run() -> Result<()> {
-    let settings = Settings::load();
+    let (settings, credential_health, settings_error) = match Settings::load_runtime() {
+        Ok(loaded) => (
+            loaded.settings,
+            loaded.credential_health,
+            loaded.settings_error,
+        ),
+        Err(error) => {
+            warn!(error = %error, "settings load failed; using defaults until a valid file is saved");
+            (
+                Settings::default(),
+                CredentialHealth::default(),
+                Some(format!("settings could not be loaded: {error}")),
+            )
+        }
+    };
+    if let Some(message) = &credential_health.message {
+        warn!(message, "credential migration needs attention");
+    }
+    if let Some(error) = &settings_error {
+        warn!(
+            error,
+            "settings validation failed; using defaults until a valid file is saved"
+        );
+    }
+    info!(
+        engine = %settings.engine,
+        auto_paste = settings.auto_paste,
+        overlay = settings.overlay,
+        sounds = settings.sounds,
+        "settings loaded"
+    );
     let recorder = Recorder::new()?;
     let tray = tray::Tray::new(&settings)?;
+    let worker = Worker::spawn()?;
 
     let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
     let proxy = event_loop.create_proxy();
 
     let hk_stop = Arc::new(AtomicBool::new(false));
     spawn_hotkey_thread(settings.clone(), proxy.clone(), hk_stop.clone())?;
-    spawn_tick_thread(proxy);
+    spawn_tick_thread(proxy.clone());
 
     // Visual recording indicator on its own thread + own Win32 message loop.
     // It only reads atomics from the recorder, so there's no shared state with
     // the main winit/tray loop that could deadlock.
-    overlay::spawn(overlay::OverlayHandles {
-        recording: recorder.recording.clone(),
-        level_x10000: recorder.last_rms_x10000.clone(),
-        stop: hk_stop.clone(),
-    });
+    let overlay = overlay::spawn(
+        overlay::OverlayHandles {
+            recording: recorder.recording.clone(),
+            level_x10000: recorder.last_rms_x10000.clone(),
+            stop: hk_stop.clone(),
+        },
+        settings.overlay,
+    )?;
 
-    let engine_loading = Arc::new(AtomicBool::new(false));
     let state = State {
         settings,
+        credential_health,
+        settings_error,
         recorder,
         tray,
+        overlay,
         record_started: None,
-        engine: None,
-        engine_loading,
+        worker,
+        engine_state: EngineState::NotStarted,
+        model_state: None,
+        load_generation: 0,
+        pending_jobs: 0,
+        active_job: None,
+        shutting_down: false,
         hk_stop,
+        proxy,
+        diagnostics_exporting: false,
     };
 
     // Wait mode: loop sleeps until a message arrives (tray click, user event,
@@ -120,6 +186,7 @@ fn spawn_tick_thread(proxy: EventLoopProxy<UserEvent>) {
 
 fn hotkey_loop(initial: Settings, proxy: EventLoopProxy<UserEvent>, stop: Arc<AtomicBool>) {
     let mut settings = initial;
+    let mut last_settings_error: Option<String> = None;
     // Try OS-level registration so other apps know the combo is taken.
     // If that fails (e.g. Windows already reserved it), fall through to
     // pure GetAsyncKeyState polling — that always works regardless of
@@ -139,6 +206,10 @@ fn hotkey_loop(initial: Settings, proxy: EventLoopProxy<UserEvent>, stop: Arc<At
         .map(|m| hotkey::mod_vk_for(m))
         .collect();
     let mut poll_state = hotkey::PollState::default();
+    let mut hook_health = key_hook::HealthMonitor::new(
+        hotkey::configured_vks(trigger_vk, &mod_vks),
+        hotkey::secondary_key_down,
+    );
     let mut last_check = Instant::now();
 
     while !stop.load(Ordering::Relaxed) {
@@ -146,10 +217,7 @@ fn hotkey_loop(initial: Settings, proxy: EventLoopProxy<UserEvent>, stop: Arc<At
             let user_ev = match ev {
                 hotkey::Event::Press => UserEvent::HotkeyPress,
                 hotkey::Event::Release => {
-                    let shift_is_modifier = settings
-                        .hotkey_modifiers
-                        .iter()
-                        .any(|m| m == "shift");
+                    let shift_is_modifier = settings.hotkey_modifiers.iter().any(|m| m == "shift");
                     let enhance = !shift_is_modifier && shift_currently_down();
                     UserEvent::HotkeyRelease { enhance }
                 }
@@ -158,25 +226,58 @@ fn hotkey_loop(initial: Settings, proxy: EventLoopProxy<UserEvent>, stop: Arc<At
                 break;
             }
         }
+        if hook_health.observe(
+            Instant::now(),
+            hotkey::secondary_key_down,
+            hotkey::configured_key_down,
+        ) {
+            warn!(
+                events_seen = key_hook::events_seen(),
+                "configured key transitions were repeatedly absent from the keyboard hook; requesting reinstall"
+            );
+            key_hook::request_reinstall();
+            poll_state = hotkey::PollState::default();
+        }
 
         if last_check.elapsed() >= Duration::from_millis(500) {
             last_check = Instant::now();
-            let new = Settings::load();
-            if new.hotkey_modifiers != settings.hotkey_modifiers
-                || new.hotkey_trigger != settings.hotkey_trigger
-            {
-                info!(
-                    "hotkey changed: {:?}+{} -> {:?}+{}",
-                    settings.hotkey_modifiers, settings.hotkey_trigger,
-                    new.hotkey_modifiers, new.hotkey_trigger
-                );
-                drop(_mgr.take());
-                poll_state = hotkey::PollState::default();
-                _mgr = hotkey::HotkeyManager::register(&new).ok();
-                trigger_vk = hotkey::trigger_vk_for(&new.hotkey_trigger);
-                mod_vks = new.hotkey_modifiers.iter().map(|m| hotkey::mod_vk_for(m)).collect();
+            match Settings::load() {
+                Ok(new) => {
+                    last_settings_error = None;
+                    if new.hotkey_modifiers != settings.hotkey_modifiers
+                        || new.hotkey_trigger != settings.hotkey_trigger
+                    {
+                        info!(
+                            "hotkey changed: {:?}+{} -> {:?}+{}",
+                            settings.hotkey_modifiers,
+                            settings.hotkey_trigger,
+                            new.hotkey_modifiers,
+                            new.hotkey_trigger
+                        );
+                        drop(_mgr.take());
+                        poll_state = hotkey::PollState::default();
+                        _mgr = hotkey::HotkeyManager::register(&new).ok();
+                        trigger_vk = hotkey::trigger_vk_for(&new.hotkey_trigger);
+                        mod_vks = new
+                            .hotkey_modifiers
+                            .iter()
+                            .map(|modifier| hotkey::mod_vk_for(modifier))
+                            .collect();
+                        hook_health = key_hook::HealthMonitor::new(
+                            hotkey::configured_vks(trigger_vk, &mod_vks),
+                            hotkey::secondary_key_down,
+                        );
+                    }
+                    settings = new;
+                }
+                Err(error) => {
+                    let message = error.to_string();
+                    if last_settings_error.as_deref() != Some(message.as_str()) {
+                        warn!(error = %message, "hotkey settings reload failed; keeping the last valid hotkey");
+                        last_settings_error = Some(message);
+                    }
+                }
             }
-            settings = new;
         }
 
         thread::sleep(Duration::from_millis(8));
@@ -184,39 +285,39 @@ fn hotkey_loop(initial: Settings, proxy: EventLoopProxy<UserEvent>, stop: Arc<At
     info!("hotkey thread exiting");
 }
 
-struct AppHandler { state: State }
+struct AppHandler {
+    state: State,
+}
 
 impl AppHandler {
     fn start_engine_load(&mut self) {
-        if self.state.engine.is_some() || self.state.engine_loading.load(Ordering::Relaxed) {
+        if self.state.shutting_down {
             return;
         }
-        self.state.engine_loading.store(true, Ordering::Relaxed);
         let engine_name = self.state.settings.engine.clone();
-        let loading_flag = self.state.engine_loading.clone();
-        // The default Windows worker-thread stack is 1 MiB. QnnHtp.dll's
-        // EPContext binary loader needs more and triggers
-        // STATUS_STACK_BUFFER_OVERRUN (0xC0000409, /GS cookie corruption
-        // from stack overflow). Give it a generous 32 MiB. Cheap on x64.
-        thread::Builder::new()
-            .name("engine-loader".into())
-            .stack_size(32 * 1024 * 1024)
-            .spawn(move || {
-                match asr::load(&engine_name) {
-                    Ok(e) => {
-                        info!("engine loaded: {}", e.label());
-                        STAGED_ENGINE.lock().replace(Arc::from(e));
-                    }
-                    Err(e) => warn!(error = %e, "engine load failed"),
-                }
-                loading_flag.store(false, Ordering::Relaxed);
-            })
-            .expect("spawn engine-loader thread");
+        match self.state.worker.load(engine_name.clone()) {
+            Ok(generation) => {
+                self.state.load_generation = generation;
+                self.state.engine_state = EngineState::Loading;
+                self.state.model_state = None;
+                self.state.tray.set_status(
+                    tray::IconColor::Transcribing,
+                    &format!("OpenWritr — loading {engine_name}"),
+                );
+            }
+            Err(error) => {
+                self.state.engine_state = EngineState::Failed {
+                    error: error.to_string(),
+                };
+                self.state.tray.set_status(
+                    tray::IconColor::Error,
+                    "OpenWritr — could not start engine loader (see log)",
+                );
+                warn!(error = %error, "failed to start engine load");
+            }
+        }
     }
 }
-
-static STAGED_ENGINE: parking_lot::Mutex<Option<Arc<dyn asr::Engine>>> =
-    parking_lot::Mutex::new(None);
 
 impl ApplicationHandler<UserEvent> for AppHandler {
     fn resumed(&mut self, _el: &ActiveEventLoop) {
@@ -229,8 +330,18 @@ impl ApplicationHandler<UserEvent> for AppHandler {
         match ev {
             UserEvent::HotkeyPress => self.on_press(),
             UserEvent::HotkeyRelease { enhance } => self.on_release(enhance),
-            UserEvent::TranscribeDone => {
-                self.state.tray.set_color(tray::IconColor::Idle);
+            UserEvent::DiagnosticsExported => {
+                self.state.diagnostics_exporting = false;
+                self.state
+                    .tray
+                    .set_tooltip("OpenWritr — diagnostics exported");
+            }
+            UserEvent::DiagnosticsExportFailed(error) => {
+                self.state.diagnostics_exporting = false;
+                warn!(error = %error, "diagnostics export failed");
+                self.state
+                    .tray
+                    .set_tooltip("OpenWritr — diagnostics export failed (see log)");
             }
             UserEvent::Tick => self.tick(el),
         }
@@ -245,20 +356,95 @@ impl ApplicationHandler<UserEvent> for AppHandler {
 
 impl AppHandler {
     fn tick(&mut self, el: &ActiveEventLoop) {
-        // Engine ready?
-        if self.state.engine.is_none() {
-            if let Some(e) = STAGED_ENGINE.lock().take() {
-                self.state.engine = Some(e);
+        while let Some(event) = self.state.worker.try_recv() {
+            self.handle_worker_event(el, event);
+        }
+
+        if self.state.record_started.is_some() {
+            if self.state.recorder.stream_failed() {
+                self.finish_recording(false, false);
+            } else {
+                let max_seconds = self.state.settings.max_record_seconds;
+                let timer_limit_reached = self
+                    .state
+                    .record_started
+                    .map(|started| started.elapsed().as_secs_f32() >= max_seconds)
+                    .unwrap_or(false);
+                if self.state.recorder.limit_reached() || timer_limit_reached {
+                    self.finish_recording(false, true);
+                }
             }
         }
 
         // Drain tray menu events.
         while let Ok(ev) = MenuEvent::receiver().try_recv() {
             if ev.id == self.state.tray.menu_quit_id {
-                info!("quit via tray");
-                self.state.hk_stop.store(true, Ordering::Relaxed);
-                el.exit();
+                self.request_shutdown(el);
                 return;
+            }
+            if ev.id == self.state.tray.menu_cancel_model_id {
+                if matches!(self.state.engine_state, EngineState::Loading) {
+                    self.state.load_generation = self.state.worker.cancel_load();
+                    self.state.engine_state = EngineState::NotStarted;
+                    self.state.model_state = Some(ModelState::Cancelled);
+                    self.state.tray.set_status(
+                        tray::IconColor::Error,
+                        "OpenWritr — model download cancelled; choose Retry",
+                    );
+                    info!("model acquisition cancelled by user");
+                }
+                continue;
+            }
+            if ev.id == self.state.tray.menu_retry_engine_id {
+                self.start_engine_load();
+                continue;
+            }
+            if ev.id == self.state.tray.menu_open_logs_id {
+                if let Err(e) = diagnostics::open_logs_dir() {
+                    warn!(error = %e, "failed to open logs directory");
+                    self.state.tray.set_status(
+                        tray::IconColor::Error,
+                        "OpenWritr — could not open logs (see log)",
+                    );
+                }
+                continue;
+            }
+            if ev.id == self.state.tray.menu_export_diagnostics_id {
+                if !self.state.diagnostics_exporting {
+                    self.state.diagnostics_exporting = true;
+                    self.state
+                        .tray
+                        .set_tooltip("OpenWritr — exporting diagnostics…");
+                    let settings = self.state.settings.clone();
+                    let proxy = self.state.proxy.clone();
+                    let spawn = thread::Builder::new()
+                        .name("diagnostics-export".into())
+                        .spawn(move || {
+                            let event = match diagnostics::export_bundle(&settings) {
+                                Ok(path) => {
+                                    info!(file = %path.display(), "diagnostics exported");
+                                    if let Err(e) = diagnostics::reveal(&path) {
+                                        warn!(error = %e, "failed to reveal diagnostics bundle");
+                                    }
+                                    UserEvent::DiagnosticsExported
+                                }
+                                Err(e) => UserEvent::DiagnosticsExportFailed(e.to_string()),
+                            };
+                            let _ = proxy.send_event(event);
+                        });
+                    if let Err(e) = spawn {
+                        self.state.diagnostics_exporting = false;
+                        warn!(error = %e, "failed to start diagnostics export");
+                        self.state
+                            .tray
+                            .set_tooltip("OpenWritr — diagnostics export failed (see log)");
+                    }
+                } else {
+                    self.state
+                        .tray
+                        .set_tooltip("OpenWritr — diagnostics export already running");
+                }
+                continue;
             }
             if ev.id == self.state.tray.menu_settings_id {
                 info!("opening settings UI subprocess");
@@ -296,56 +482,158 @@ impl AppHandler {
             if changed {
                 *last = mtime;
                 drop(last);
-                let new = Settings::load();
-                let old_engine = self.state.settings.engine.clone();
-                self.state.settings = new;
-                let new_engine = self.state.settings.engine.clone();
-                if new_engine != old_engine {
-                    info!("engine changed: {old_engine} -> {new_engine}; reloading");
-                    self.state.engine = None;
-                    self.start_engine_load();
+                match Settings::load_runtime() {
+                    Ok(loaded) => {
+                        self.state.credential_health = loaded.credential_health;
+                        if let Some(message) = &self.state.credential_health.message {
+                            warn!(message, "credential migration needs attention");
+                        }
+                        if let Some(error) = loaded.settings_error {
+                            warn!(error, "settings reload failed validation; keeping the last valid settings");
+                            self.state.settings_error = Some(error);
+                            self.update_job_status();
+                        } else {
+                            let old_engine = self.state.settings.engine.clone();
+                            let old_overlay = self.state.settings.overlay;
+                            self.state.settings = loaded.settings;
+                            self.state.settings_error = None;
+                            if self.state.settings.overlay != old_overlay {
+                                if let Err(error) =
+                                    self.state.overlay.set_enabled(self.state.settings.overlay)
+                                {
+                                    warn!(error, "failed to update overlay setting");
+                                }
+                            }
+                            let new_engine = self.state.settings.engine.clone();
+                            if new_engine != old_engine {
+                                info!("engine changed: {old_engine} -> {new_engine}; reloading");
+                                self.start_engine_load();
+                            } else {
+                                self.update_job_status();
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        warn!(error = %error, "settings reload failed; keeping the last valid settings");
+                        self.state.settings_error =
+                            Some(format!("settings could not be reloaded: {error}"));
+                        self.update_job_status();
+                    }
                 }
             }
-        }
-        // Keep RELOAD_AT path as a no-op safety net (cleared if ever set).
-        if let Some(at) = *RELOAD_AT.lock() {
-            if Instant::now() >= at {
-                *RELOAD_AT.lock() = None;
-            }
-        }
-
-        if DONE_FLAG.swap(false, Ordering::Relaxed) {
-            self.state.tray.set_color(tray::IconColor::Idle);
         }
     }
 
     fn on_press(&mut self) {
-        if self.state.record_started.is_none() {
-            self.state.recorder.start();
-            self.state.tray.set_color(tray::IconColor::Recording);
-            self.state.record_started = Some(Instant::now());
-            if self.state.settings.sounds {
-                sounds::play_start();
+        if self.state.shutting_down || self.state.record_started.is_some() {
+            return;
+        }
+        if !matches!(self.state.engine_state, EngineState::Ready { .. }) {
+            let (color, status) = self.blocked_recording_status();
+            self.state.tray.set_status(color, &status);
+            if let Err(error) = self.state.overlay.show_status(
+                status
+                    .strip_prefix("OpenWritr — ")
+                    .unwrap_or(&status)
+                    .to_string(),
+            ) {
+                warn!(error, "failed to show overlay status");
             }
-            info!("recording start");
+            info!(status, "recording blocked while engine is unavailable");
+            return;
+        }
+
+        if self.state.record_started.is_none() {
+            match self
+                .state
+                .recorder
+                .start(self.state.settings.max_record_seconds)
+            {
+                Ok(capture) => {
+                    self.state.tray.set_status(
+                        tray::IconColor::Recording,
+                        &format!("OpenWritr — recording from {}", capture.device_name),
+                    );
+                    self.state.record_started = Some(Instant::now());
+                    if self.state.settings.sounds {
+                        sounds::play_start();
+                    }
+                    info!(
+                        device = %capture.device_name,
+                        sample_rate = capture.sample_rate,
+                        channels = capture.channels,
+                        "recording start"
+                    );
+                }
+                Err(e) => {
+                    self.state.tray.set_status(
+                        tray::IconColor::Error,
+                        "OpenWritr — microphone unavailable (see log)",
+                    );
+                    warn!(error = %e, "failed to start recording");
+                }
+            }
         }
     }
 
     fn on_release(&mut self, enhance: bool) {
-        if let Some(started) = self.state.record_started.take() {
-            let samples = self.state.recorder.stop();
-            self.state.tray.set_color(tray::IconColor::Idle);
-            if self.state.settings.sounds {
-                sounds::play_stop();
+        if self.state.record_started.is_some() {
+            self.finish_recording(enhance, false);
+        }
+    }
+
+    fn finish_recording(&mut self, enhance: bool, timer_limit_reached: bool) {
+        let Some(started) = self.state.record_started.take() else {
+            return;
+        };
+        let recording = match self.state.recorder.stop() {
+            Ok(recording) => recording,
+            Err(e) => {
+                self.state.tray.set_status(
+                    tray::IconColor::Error,
+                    "OpenWritr — microphone error (see log)",
+                );
+                warn!(error = %e, "failed to stop recording");
+                return;
             }
-            let dur = started.elapsed();
-            let min = self.state.settings.min_record_seconds;
-            let sr = self.state.recorder.sample_rate;
-            if dur.as_secs_f32() < min {
-                info!(secs = dur.as_secs_f32(), "below min — discarded");
-            } else {
-                self.dispatch_transcribe(samples, sr, enhance);
-            }
+        };
+        if self.state.settings.sounds {
+            sounds::play_stop();
+        }
+        if let Some(error) = recording.stream_error {
+            self.state.tray.set_status(
+                tray::IconColor::Error,
+                "OpenWritr — microphone stream failed (see log)",
+            );
+            warn!(error = %error, "recording aborted after stream failure");
+            return;
+        }
+
+        self.state
+            .tray
+            .set_status(tray::IconColor::Idle, "OpenWritr");
+        let reached_limit = timer_limit_reached || recording.reached_limit;
+        if reached_limit {
+            info!(
+                max_seconds = self.state.settings.max_record_seconds,
+                "maximum recording duration reached"
+            );
+        }
+
+        let dur = started.elapsed();
+        let min = self.state.settings.min_record_seconds;
+        if dur.as_secs_f32() < min {
+            info!(secs = dur.as_secs_f32(), "below min — discarded");
+        } else {
+            info!(
+                device = %recording.device_name,
+                sample_rate = recording.sample_rate,
+                channels = recording.channels,
+                samples = recording.samples.len(),
+                reached_limit,
+                "recording stop"
+            );
+            self.dispatch_transcribe(recording.samples, recording.sample_rate, enhance);
         }
     }
 }
@@ -357,80 +645,321 @@ fn shift_currently_down() -> bool {
 
 impl AppHandler {
     fn dispatch_transcribe(&mut self, samples: Vec<f32>, sr: u32, enhance_requested: bool) {
-        let Some(engine) = self.state.engine.clone() else {
-            warn!("engine not yet ready, discarding {} samples", samples.len());
+        if self.state.shutting_down {
+            warn!("discarding completed recording because shutdown has started");
             return;
+        }
+        let enhance_requested = if enhance_requested
+            && self.state.settings.enhance.provider == "openai_compatible"
+            && self.state.credential_health.enhancement_disabled
+        {
+            warn!("enhancement skipped because credential migration is incomplete");
+            if let Err(error) = self
+                .state
+                .overlay
+                .show_status("Enhancement disabled: secure the API key in Settings")
+            {
+                warn!(error, "failed to show overlay status");
+            }
+            false
+        } else {
+            enhance_requested
         };
-        self.state.tray.set_color(tray::IconColor::Transcribing);
-        let auto_paste = self.state.settings.auto_paste;
-        let settings = self.state.settings.clone();
-        thread::spawn(move || {
-            let text = match engine.transcribe(&samples, sr) {
-                Ok(t) => t,
-                Err(e) => {
-                    warn!(error = %e, "transcription failed");
-                    DONE_FLAG.store(true, Ordering::Relaxed);
+        match self
+            .state
+            .worker
+            .enqueue(samples, sr, enhance_requested, self.state.settings.clone())
+        {
+            Ok(id) => {
+                self.state.pending_jobs = self.state.pending_jobs.saturating_add(1);
+                info!(
+                    id,
+                    queue_depth = self.state.pending_jobs,
+                    "transcription job queued"
+                );
+                self.update_job_status();
+            }
+            Err(error) => {
+                warn!(error = %error, "failed to queue transcription");
+                self.state.tray.set_status(
+                    tray::IconColor::Error,
+                    "OpenWritr — could not queue transcription (see log)",
+                );
+            }
+        }
+    }
+
+    fn handle_worker_event(&mut self, el: &ActiveEventLoop, event: WorkerEvent) {
+        match event {
+            WorkerEvent::ModelState {
+                generation,
+                engine,
+                state,
+            } => {
+                if generation != self.state.load_generation || engine != self.state.settings.engine
+                {
                     return;
                 }
-            };
-            if text.is_empty() {
-                DONE_FLAG.store(true, Ordering::Relaxed);
-                return;
+                let color = match &state {
+                    ModelState::Failed { .. } | ModelState::Cancelled => tray::IconColor::Error,
+                    ModelState::Ready => tray::IconColor::Transcribing,
+                    ModelState::Missing
+                    | ModelState::Downloading { .. }
+                    | ModelState::Verifying => tray::IconColor::Transcribing,
+                };
+                let status = state.status_text(&engine);
+                self.state.model_state = Some(state);
+                self.state
+                    .tray
+                    .set_status(color, &format!("OpenWritr — {status}"));
             }
-            // Enhance only when the user explicitly requested it by holding
-            // Shift at release time AND a provider is configured.
-            let final_text = if enhance_requested && settings.enhance.provider != "off" {
-                info!("enhance requested (shift held)");
-                match enhance::enhance(&text, &settings) {
-                    Ok(t) if !t.trim().is_empty() => t,
-                    Ok(_) => text,
-                    Err(e) => {
-                        warn!(error = %e, "enhance failed; using raw transcript");
-                        text
-                    }
+            WorkerEvent::EngineLoading { generation, engine } => {
+                if generation != self.state.load_generation || engine != self.state.settings.engine
+                {
+                    return;
                 }
-            } else {
-                text
-            };
-            info!(chars = final_text.len(), "transcript ready");
-            if auto_paste {
-                paste(&final_text);
+                self.state.engine_state = EngineState::Loading;
+                self.state.tray.set_status(
+                    tray::IconColor::Transcribing,
+                    &format!("OpenWritr — loading {engine}"),
+                );
             }
-            DONE_FLAG.store(true, Ordering::Relaxed);
-        });
+            WorkerEvent::EngineReady {
+                generation,
+                engine,
+                label,
+            } => {
+                if generation != self.state.load_generation || engine != self.state.settings.engine
+                {
+                    return;
+                }
+                info!(engine, label, "selected engine ready");
+                self.state.engine_state = EngineState::Ready {
+                    label: label.clone(),
+                };
+                self.state.model_state = Some(ModelState::Ready);
+                if self.state.pending_jobs == 0 {
+                    self.update_job_status();
+                }
+            }
+            WorkerEvent::EngineFailed {
+                generation,
+                engine,
+                error,
+            } => {
+                if generation != self.state.load_generation || engine != self.state.settings.engine
+                {
+                    return;
+                }
+                warn!(engine, error = %error, "selected engine failed to load");
+                let short_error = short_error(&error);
+                self.state.engine_state = EngineState::Failed { error };
+                self.state.tray.set_status(
+                    tray::IconColor::Error,
+                    &format!("OpenWritr — {engine} failed: {short_error}; choose Retry"),
+                );
+            }
+            WorkerEvent::JobStarted { id } => {
+                self.state.active_job = Some(id);
+                self.update_job_status();
+            }
+            WorkerEvent::JobCompleted {
+                id,
+                text,
+                auto_paste,
+            } => {
+                self.finish_job(id);
+                if auto_paste && !text.is_empty() {
+                    paste::paste(&text);
+                }
+                self.update_job_status();
+            }
+            WorkerEvent::JobFailed { id, error } => {
+                self.finish_job(id);
+                warn!(id, error = %error, "transcription job failed");
+                if self.state.pending_jobs == 0 {
+                    self.state.tray.set_status(
+                        tray::IconColor::Error,
+                        &format!("OpenWritr — transcription failed: {}", short_error(&error)),
+                    );
+                } else {
+                    self.update_job_status();
+                }
+            }
+            WorkerEvent::JobDiscarded { id } => {
+                self.finish_job(id);
+                info!(id, "transcription job discarded");
+                self.update_job_status();
+            }
+            WorkerEvent::ShutdownComplete => {
+                info!("worker shutdown complete");
+                el.exit();
+            }
+        }
+    }
+
+    fn finish_job(&mut self, id: u64) {
+        self.state.pending_jobs = self.state.pending_jobs.saturating_sub(1);
+        if self.state.active_job == Some(id) {
+            self.state.active_job = None;
+        }
+    }
+
+    fn update_job_status(&self) {
+        if self.state.pending_jobs > 0 {
+            let noun = if self.state.pending_jobs == 1 {
+                "job"
+            } else {
+                "jobs"
+            };
+            self.state.tray.set_status(
+                tray::IconColor::Transcribing,
+                &format!(
+                    "OpenWritr — transcribing; {} {noun} remaining",
+                    self.state.pending_jobs
+                ),
+            );
+        } else if !self.state.shutting_down {
+            if let EngineState::Failed { error } = &self.state.engine_state {
+                self.state.tray.set_status(
+                    tray::IconColor::Error,
+                    &format!("OpenWritr — engine failed: {}", short_error(error)),
+                );
+            } else if let Some(issue) = self.configuration_issue() {
+                self.state.tray.set_status(
+                    tray::IconColor::Error,
+                    &format!("OpenWritr — {}", short_error(issue)),
+                );
+            } else {
+                match &self.state.engine_state {
+                    EngineState::Ready { label } => self.state.tray.set_status(
+                        tray::IconColor::Idle,
+                        &format!("OpenWritr — ready: {label}"),
+                    ),
+                    EngineState::Loading => self
+                        .state
+                        .tray
+                        .set_status(tray::IconColor::Transcribing, "OpenWritr — loading engine"),
+                    EngineState::NotStarted => self
+                        .state
+                        .tray
+                        .set_status(tray::IconColor::Error, "OpenWritr — engine not ready"),
+                    EngineState::Failed { .. } => unreachable!(),
+                }
+            }
+        }
+    }
+
+    fn configuration_issue(&self) -> Option<&str> {
+        self.state
+            .settings_error
+            .as_deref()
+            .or(self.state.credential_health.message.as_deref())
+    }
+
+    fn blocked_recording_status(&self) -> (tray::IconColor, String) {
+        if let Some(state) = &self.state.model_state {
+            let color = match state {
+                ModelState::Failed { .. } | ModelState::Cancelled => tray::IconColor::Error,
+                _ => tray::IconColor::Transcribing,
+            };
+            return (
+                color,
+                format!(
+                    "OpenWritr — recording blocked: {}",
+                    state.status_text(&self.state.settings.engine)
+                ),
+            );
+        }
+        match &self.state.engine_state {
+            EngineState::Loading => (
+                tray::IconColor::Transcribing,
+                "OpenWritr — recording blocked: engine is loading".into(),
+            ),
+            EngineState::Failed { error } => (
+                tray::IconColor::Error,
+                format!(
+                    "OpenWritr — recording blocked: engine failed: {}",
+                    short_error(error)
+                ),
+            ),
+            EngineState::NotStarted => (
+                tray::IconColor::Error,
+                "OpenWritr — recording blocked: engine is not ready".into(),
+            ),
+            EngineState::Ready { .. } => (tray::IconColor::Idle, "OpenWritr — engine ready".into()),
+        }
+    }
+
+    fn request_shutdown(&mut self, el: &ActiveEventLoop) {
+        if self.state.shutting_down {
+            return;
+        }
+        info!(pending_jobs = self.state.pending_jobs, "quit requested");
+        self.state.shutting_down = true;
+        self.state.hk_stop.store(true, Ordering::Relaxed);
+        if self.state.record_started.take().is_some() {
+            let _ = self.state.recorder.stop();
+            info!("active recording discarded during shutdown");
+        }
+
+        let mode = if self.state.pending_jobs > 0 {
+            prompt_shutdown_mode(self.state.pending_jobs)
+        } else {
+            ShutdownMode::Discard
+        };
+        let status = match mode {
+            ShutdownMode::Wait => format!(
+                "OpenWritr — finishing {} queued job(s) before exit",
+                self.state.pending_jobs
+            ),
+            ShutdownMode::Discard => "OpenWritr — discarding queued work and exiting".into(),
+        };
+        self.state
+            .tray
+            .set_status(tray::IconColor::Transcribing, &status);
+        if let Err(error) = self.state.worker.shutdown(mode) {
+            warn!(error = %error, "worker shutdown command failed");
+            el.exit();
+        }
     }
 }
 
-static DONE_FLAG: AtomicBool = AtomicBool::new(false);
-static RELOAD_AT: parking_lot::Mutex<Option<Instant>> = parking_lot::Mutex::new(None);
-static LAST_SETTINGS_MTIME: parking_lot::Mutex<Option<std::time::SystemTime>> = parking_lot::Mutex::new(None);
+static LAST_SETTINGS_MTIME: parking_lot::Mutex<Option<std::time::SystemTime>> =
+    parking_lot::Mutex::new(None);
 
-fn paste(text: &str) {
-    let mut clip = match Clipboard::new() {
-        Ok(c) => c,
-        Err(e) => {
-            warn!(error = %e, "clipboard open failed");
-            return;
-        }
+fn short_error(error: &str) -> String {
+    const MAX_CHARS: usize = 140;
+    let mut shortened = error.chars().take(MAX_CHARS).collect::<String>();
+    if error.chars().count() > MAX_CHARS {
+        shortened.push('…');
+    }
+    shortened
+}
+
+fn prompt_shutdown_mode(pending_jobs: usize) -> ShutdownMode {
+    use windows::core::HSTRING;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        MessageBoxW, IDNO, MB_DEFBUTTON1, MB_ICONQUESTION, MB_SETFOREGROUND, MB_YESNO,
     };
-    let saved = clip.get_text().ok();
-    if clip.set_text(text.to_string()).is_err() {
-        warn!("clipboard write failed");
-        return;
-    }
-    if let Ok(mut enigo) = Enigo::new(&EnigoSettings::default()) {
-        let _ = enigo.key(Key::Control, Direction::Press);
-        let _ = enigo.key(Key::Unicode('v'), Direction::Click);
-        let _ = enigo.key(Key::Control, Direction::Release);
+
+    let message = HSTRING::from(format!(
+        "OpenWritr is still processing {pending_jobs} transcription job(s).\n\n\
+         Choose Yes to wait for them to finish before exiting.\n\
+         Choose No to discard queued results and exit after the current native call reaches a safe boundary."
+    ));
+    let title = HSTRING::from("OpenWritr");
+    let response = unsafe {
+        MessageBoxW(
+            None,
+            &message,
+            &title,
+            MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON1 | MB_SETFOREGROUND,
+        )
+    };
+    if response == IDNO {
+        ShutdownMode::Discard
     } else {
-        warn!("enigo init failed");
-    }
-    if let Some(prev) = saved {
-        thread::spawn(move || {
-            thread::sleep(Duration::from_millis(400));
-            if let Ok(mut c) = Clipboard::new() {
-                let _ = c.set_text(prev);
-            }
-        });
+        ShutdownMode::Wait
     }
 }

@@ -28,6 +28,8 @@ ONNX-encoder-on-HTP-via-EP-partitioning path with a precompiled HTP binary.
 
 import argparse
 import glob
+import json
+import re
 import sys
 import time
 from pathlib import Path
@@ -126,7 +128,12 @@ def main():
     ap.add_argument("--seconds", type=int, default=28,
                     help="static audio window length in seconds — MUST match the value used "
                          "in build_npu_encoder.py when generating the input encoder")
+    ap.add_argument("--qairt-version", default="2.45",
+                    help="AI Hub QAIRT major.minor line (default: 2.45, matching the shipped runtime)")
     args = ap.parse_args()
+
+    if not re.fullmatch(r"\d+\.\d+", args.qairt_version):
+        sys.exit("--qairt-version must use major.minor syntax, for example 2.45")
 
     global AUDIO_SECONDS, T_FIXED
     AUDIO_SECONDS = args.seconds
@@ -189,7 +196,14 @@ def main():
         print(f"  quantize done in {time.time()-t0:.0f}s")
         model_for_compile = quantized_model
 
-    print(f"\nsubmitting compile job (target: {device.name}, qnn_context_binary)...")
+    compile_options = (
+        "--target_runtime qnn_context_binary "
+        f"--truncate_64bit_io --qairt_version {args.qairt_version}"
+    )
+    print(
+        f"\nsubmitting compile job (target: {device.name}, "
+        f"qnn_context_binary, QAIRT {args.qairt_version})..."
+    )
     t0 = time.time()
     compile_job = hub.submit_compile_job(
         model=model_for_compile,
@@ -198,7 +212,7 @@ def main():
             "audio_signal": ((1, MEL_BINS, T_FIXED), "float32"),
             "length":       ((1,), "int64"),
         },
-        options="--target_runtime qnn_context_binary --truncate_64bit_io",
+        options=compile_options,
         name="parakeet-encoder-htp-compile",
     )
     print(f"  url: {compile_job.url}")
@@ -210,7 +224,17 @@ def main():
 
     out = Path(args.out); out.parent.mkdir(parents=True, exist_ok=True)
     target_model.download(str(out))
+    provenance = {
+        "ai_hub_job_url": str(compile_job.url),
+        "ai_hub_model_id": getattr(target_model, "model_id", None),
+        "device": device.name,
+        "options": compile_options,
+        "qairt_version": args.qairt_version,
+    }
+    provenance_path = out.with_name(out.name + ".provenance.json")
+    provenance_path.write_text(json.dumps(provenance, indent=2, sort_keys=True) + "\n")
     print(f"\nDONE: {out} ({out.stat().st_size/1e6:.1f} MB)")
+    print(f"provenance: {provenance_path}")
     print()
     print("Next steps in Rust:")
     print(f'  - in src/asr/parakeet.rs::build_npu_session, replace commit_from_file(path) with')

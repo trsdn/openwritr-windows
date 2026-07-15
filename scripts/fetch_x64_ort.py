@@ -1,42 +1,22 @@
-"""
-Fetch the x86_64 (Intel/AMD) CPU build of onnxruntime.dll into vendor/x64/.
+"""Compatibility wrapper for the hash-pinned x64 runtime fetcher."""
 
-The arm64 build gets its DLL from `pip install onnxruntime-qnn`, but that
-package is Snapdragon-only. For the Intel/AMD build we need the plain
-`onnxruntime` CPU wheel (win_amd64) and just its onnxruntime.dll — no QNN,
-no execution-provider plugins. Parakeet runs on the CPU EP.
-
-    python scripts/fetch_x64_ort.py [--version 1.26.0]
-"""
 import argparse
-import io
-import json
-import urllib.request
-import zipfile
-from pathlib import Path
 
-OUT = Path(__file__).resolve().parent.parent / "vendor" / "x64"
+from fetch_runtime import load_manifest, stage_runtime
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--version", default="1.26.0")
-    ap.add_argument("--py", default="cp311")
+    ap.add_argument("--version")
     args = ap.parse_args()
 
-    meta = json.load(urllib.request.urlopen(
-        f"https://pypi.org/pypi/onnxruntime/{args.version}/json"))
-    url = next(f["url"] for f in meta["urls"]
-               if "win_amd64" in f["filename"] and args.py in f["filename"])
-    print(f"downloading {url}")
-    whl = urllib.request.urlopen(url).read()
-
-    OUT.mkdir(parents=True, exist_ok=True)
-    with zipfile.ZipFile(io.BytesIO(whl)) as z:
-        with z.open("onnxruntime/capi/onnxruntime.dll") as src:
-            data = src.read()
-    (OUT / "onnxruntime.dll").write_bytes(data)
-    print(f"wrote {OUT / 'onnxruntime.dll'} ({len(data)} bytes)")
+    pinned = load_manifest()["architectures"]["x64"]["packages"][0]["version"]
+    if args.version and args.version != pinned:
+        ap.error(
+            f"runtime version is pinned to {pinned} in runtime-manifest.json; "
+            "update the manifest and hashes instead"
+        )
+    stage_runtime("x64")
 
 
 if __name__ == "__main__":

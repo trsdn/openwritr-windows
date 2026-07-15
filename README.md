@@ -1,4 +1,4 @@
-# OpenWritr for Windows (ARM64)
+# OpenWritr for Windows
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Windows 11](https://img.shields.io/badge/Windows-11_24H2-0078D4?logo=windows)](https://github.com/trsdn/openwritr-windows)
@@ -7,9 +7,9 @@
 [![Hexagon NPU](https://img.shields.io/badge/Hexagon-NPU-FF2A00?logo=qualcomm&logoColor=white)](https://huggingface.co/trsdn/parakeet-tdt-0.6b-v3-htp-int8-8s)
 [![Release](https://img.shields.io/github/v/release/trsdn/openwritr-windows)](https://github.com/trsdn/openwritr-windows/releases/latest)
 
-Push-to-talk voice-to-text for **Windows on ARM** (Surface Pro / Snapdragon X
-Elite). Local transcription via **NVIDIA Parakeet TDT 0.6B v3** running on
-the **Hexagon NPU**. 25 languages, ~67 ms per 8-second window on the NPU.
+Push-to-talk voice-to-text for Windows. Local transcription uses **NVIDIA
+Parakeet TDT 0.6B v3** on CPU or Qualcomm Hexagon NPU, plus native
+**Whisper Large v3 Turbo** on the Snapdragon X Elite NPU.
 Optional LLM cleanup via **GitHub Copilot** (Claude Haiku 4.5, GPT-5 Mini,
 GPT-4.1) or any OpenAI-compatible endpoint.
 
@@ -26,7 +26,7 @@ admin / UAC required):
 
 | Your machine | Build | Engine |
 |---|---|---|
-| **Snapdragon X** (Surface Pro 11, etc.) | `…-arm64-…` | Hexagon NPU + CPU fallback |
+| **Snapdragon X Elite** (Surface Pro 11, etc.) | `…-arm64-…` | Parakeet CPU/NPU and Whisper NPU |
 | **Intel / AMD** laptop | `…-x64-…` | CPU INT8 |
 
 Not sure? Snapdragon laptops report "ARM-based processor" in Settings →
@@ -50,6 +50,11 @@ and no autostart.
 > folder; if you want to look inside, paste `%LOCALAPPDATA%\OpenWritr` into
 > the Explorer address bar.
 
+Logs are under `%LOCALAPPDATA%\OpenWritr\logs`. Tray actions **Open logs**
+and **Export diagnostics** provide bounded logs plus redacted runtime/model
+status; diagnostics never include audio, transcript text, clipboard contents,
+or API keys.
+
 The x64 build runs Parakeet on the CPU (no Hexagon NPU on Intel/AMD); the
 arm64 build adds the NPU engine. Both share the same multilingual model and
 UX.
@@ -60,11 +65,11 @@ UX.
 > against `SHA256SUMS.txt` attached to the release:
 > `Get-FileHash .\openwritr-windows-<arch>-vX.Y.Z-setup.exe` in PowerShell.
 
-On first launch the Parakeet model is fetched from Hugging Face into
-`%LOCALAPPDATA%\OpenWritr\models\` — one-time, ~1.2 GB on the NPU engine
-(600 MB CPU INT8 + 632 MB QNN HTP context binary), ~2 minutes on a fast
-link. A microphone icon appears in your system tray when the engine is
-ready.
+The default engine is Parakeet CPU. Its verified model files are fetched on
+first use into `%LOCALAPPDATA%\OpenWritr\models\` (~670 MB). Selecting an NPU
+engine downloads its own pinned assets with visible progress and verification:
+Parakeet NPU adds ~650 MB; Whisper NPU downloads a ~2.0 GB archive and uses
+about 2.2 GB after extraction.
 
 ## Usage
 
@@ -85,19 +90,21 @@ Tray icon → right-click → **Settings**. All fields:
 - **Hotkey**: any combination of Ctrl / Shift / Alt / Win modifiers, plus an
   optional trigger key (Space, Tab, Caps Lock, F13-F20, or `None` for
   modifiers-only). Default: Ctrl+Win, no trigger.
-- **Transcription engine**: Parakeet CPU INT8, **Parakeet NPU** (default for
-  v0.3+), Whisper Large v3 Turbo NPU. The NPU engine runs the encoder on
-  the Snapdragon X Elite Hexagon HTP via a pre-compiled QAIRT context
-  binary; preprocessor and TDT decoder remain on the CPU. Falls back to
-  CPU INT8 automatically if the NPU model fails to load.
+- **Transcription engine**: Parakeet CPU INT8 (default), Parakeet NPU, or
+  Whisper Large v3 Turbo NPU. NPU engines require the native ARM64 build on
+  Snapdragon X Elite. A selected engine failure is shown explicitly;
+  OpenWritr never silently substitutes another engine.
 - **Behaviour**: auto-paste at cursor, show overlay while recording, play
   start/stop sounds.
 - **Enhance**: provider (Off / GitHub Copilot / OpenAI-compatible API), model
   dropdown (Claude Haiku 4.5, GPT-5 Mini, GPT-4.1) or free-form custom model
-  name, base URL + API key (OpenAI-compatible only).
+  name, base URL + API key (OpenAI-compatible only). API keys are stored in
+  Windows Credential Manager, not in the settings file.
 
 Settings are stored at `%LOCALAPPDATA%\OpenWritr\settings.json`. The app polls
-the file's mtime so external edits also take effect live.
+the file's mtime so external edits also take effect live. Writes use an atomic
+replacement, and legacy plaintext API keys are migrated only after the secure
+credential can be written and read back successfully.
 
 ## Architecture
 
@@ -109,14 +116,18 @@ openwritr-windows/
 │   ├── main.rs              entry; dispatches `--settings` subprocess
 │   ├── app.rs               winit event loop, tray, hotkey thread, ASR dispatch
 │   ├── audio.rs             cpal WASAPI capture, multi-channel downmix
+│   ├── credentials.rs       Windows Credential Manager API-key storage
 │   ├── hotkey.rs            push-to-talk combo polling against key_hook state
 │   ├── key_hook.rs          global WH_KEYBOARD_LL hook → atomic key bitmap
 │   ├── overlay.rs           custom Win32 layered top-most window, GDI bars
-│   ├── settings.rs          serde struct + JSON load/save
+│   ├── settings.rs          validation, migration, atomic JSON persistence
 │   ├── settings_ui.rs       eframe/egui dialog (subprocess)
-│   ├── asr/                 ONNX Runtime pipeline (mel → encoder → TDT decoder)
-│   │   ├── parakeet.rs      Encoder enum {Cpu, Npu} + chunked long-audio pipeline
-│   │   └── qnn_ffi.rs       direct C-API FFI for the NPU encoder session
+│   ├── asr/                 ONNX Runtime ASR pipelines
+│   │   ├── parakeet.rs      CPU/NPU Parakeet pipeline
+│   │   ├── whisper_npu.rs   native chunked Whisper NPU engine
+│   │   ├── whisper_mel.rs   128-bin Whisper log-mel frontend
+│   │   ├── whisper_decoder.rs  QNN encoder/decoder and KV-cache loop
+│   │   └── qnn_ffi.rs       reusable typed QNN C-API sessions
 │   ├── enhance.rs           Copilot / OpenAI cleanup pass
 │   ├── sounds.rs            G3/E3 tone synth (start/stop pings)
 │   └── bin/package.rs       distributable-zip builder
@@ -135,9 +146,9 @@ Key design decisions:
   `CreateProcessW` on Windows ARM64 with Defender real-time scanning can block
   several seconds — doing it inline would freeze the tray pump.
 - **Overlay on its own message loop.** Layered top-most window with color-key
-  transparency, painted with double-buffered GDI. Shares only two atomics
-  (`recording` + `last_rms_x10000`) with the recorder, so it cannot deadlock
-  the main app.
+  transparency, painted with double-buffered GDI. It reads the recorder
+  atomics and receives enable/status updates through a command channel, so
+  settings changes apply without restarting the app.
 - **Multi-channel downmix in the audio callback.** The Qualcomm Aqstic mic
   array on Surface Pro exposes 4-8 interleaved channels at 48 kHz; we average
   to mono before resampling to 16 kHz.
@@ -154,34 +165,27 @@ The Rust app does not call into Python at runtime.
 
 ### Build-time Python dependency
 
-The Rust package script (`cargo run --release --bin package`) stages Qualcomm
-QNN runtime DLLs from `pip install onnxruntime-qnn` into `target/release/`
-before zipping. The DLLs are required for the NPU engine option to work at
-all (even the Python path needs them). This is the only Python touch point at
-build time; the resulting zip is fully self-contained and Python-free.
+Python is used only at build time to fetch hash-pinned runtime wheels and
+validate the canonical release manifest. The resulting packages are
+self-contained and Python-free.
 
 ```powershell
-py -3.11-arm64 -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install onnxruntime-qnn
-```
-
-After that, build + package:
-
-```powershell
-.\scripts\envup.ps1        # primes vcvars arm64 + LLVM in PATH
-cargo build --release --bin openwritr
+.\scripts\envup.ps1
+cargo build --release --bins
 cargo run --release --bin package
 ```
 
-The zip lands in `target/dist/`.
+The package command fetches the exact runtime tuple, validates versions,
+SHA-256 hashes, PE architecture, required files, and licenses, then stages
+from `release-manifest.json`. The ZIP lands in `target/dist/`.
 
 ## NPU pipeline
 
-The encoder runs as a pre-compiled QAIRT context binary on the Hexagon HTP
-of the Snapdragon X Elite. Preprocessor (mel features) and TDT decoder
-remain on the CPU EP — they are dynamic-shape, lightweight, and not a
-bottleneck.
+Parakeet runs its pre-compiled encoder on the Hexagon HTP; mel preprocessing
+and the TDT decoder stay on CPU. Whisper runs both its encoder and
+autoregressive KV-cache decoder as pre-compiled QNN sessions. It processes
+sequential 30-second chunks, detects language once per recording, and reuses
+that language for every later chunk.
 
 The compiled binary expects a fixed **8-second audio window**. For
 push-to-talk utterances ≤ 8 s the encoder is run once on a padded window.
@@ -222,15 +226,14 @@ the actual audio length within the window.
 ### Required helper DLLs
 
 The QNN backend loads several sibling DLLs by name at session-create time.
-`src/bin/package.rs` stages all of them into the release zip, but if you
-hand-assemble a distribution: alongside `onnxruntime_providers_qnn.dll`
-you need `QnnHtp.dll`, `QnnHtpPrepare.dll`, `QnnSystem.dll`, the V73/V81
-stubs (`QnnHtpV73Stub.dll`, `QnnHtpV81Stub.dll`), the per-arch skeletons
-(`libQnnHtpV73Skel.so`, `libQnnHtpV81Skel.so`), and the catalog files
-(`libqnnhtpv73.cat`, `libqnnhtpv81.cat`). Without the SKEL + .cat pair, the
-stub fails `LoadLibrary` with `ERROR_MOD_NOT_FOUND` (126) and QnnHtp later
-aborts session creation with `STATUS_STACK_BUFFER_OVERRUN` (0xC0000409)
-without a useful error.
+`scripts/fetch_runtime.py` extracts the exact, hash-pinned set recorded in
+`runtime-manifest.json`. Alongside `onnxruntime_providers_qnn.dll`, the
+X Elite path requires `QnnHtp.dll`, `QnnHtpPrepare.dll`,
+`QnnHtpNetRunExtensions.dll`, `QnnSystem.dll`, the V73 stub and skeleton,
+and its catalog file. Without the SKEL + `.cat` pair, the stub fails
+`LoadLibrary` with `ERROR_MOD_NOT_FOUND` (126) and QnnHtp later aborts
+session creation with `STATUS_STACK_BUFFER_OVERRUN` (0xC0000409) without
+a useful error.
 
 ## Models
 
@@ -238,7 +241,7 @@ without a useful error.
 |---|---|---|---|---|
 | Parakeet TDT 0.6B v3 (CPU INT8 ONNX + companion files) | [istupakov/parakeet-tdt-0.6b-v3-onnx](https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx) | ~670 MB | CC-BY-4.0 | Yes, on first run |
 | Parakeet TDT 0.6B v3 NPU encoder (QAIRT context binary + wrapper) | [trsdn/parakeet-tdt-0.6b-v3-htp-int8-8s](https://huggingface.co/trsdn/parakeet-tdt-0.6b-v3-htp-int8-8s) | ~632 MB | CC-BY-4.0 | Yes, on first NPU launch |
-| Whisper Large v3 Turbo (QNN context binary) | [qualcomm/Whisper-Large-V3-Turbo](https://huggingface.co/qualcomm/Whisper-Large-V3-Turbo) | ~1.6 GB | Apache 2.0 + BSD-3 | Python build only |
+| Whisper Large v3 Turbo (QNN encoder, decoder, tokenizer) | [qualcomm/Whisper-Large-V3-Turbo](https://huggingface.co/qualcomm/Whisper-Large-V3-Turbo) | ~2.2 GB extracted | Apache 2.0 + BSD-3 | Yes, on first Whisper launch |
 
 The NPU encoder model is device-gated to Snapdragon X Elite (Hexagon V73).
 It will not run on X Plus or any other Qualcomm chipset without
@@ -249,7 +252,7 @@ recompilation via AI Hub.
 - **OpenWritr code**: MIT — see [`LICENSE`](LICENSE).
 - **Parakeet model**: CC-BY-4.0 (NVIDIA). Attribution preserved when the
   model is downloaded.
-- **Qualcomm QNN runtime DLLs** (`QnnHtp.dll`, `QnnCpu.dll`, `Genie.dll`, etc.,
+- **Qualcomm QNN runtime DLLs** (`QnnHtp.dll`, QNN provider, V73 stub, etc.,
   bundled in the release zip): **Qualcomm AI Engine Direct redistributable
   license**. The full text ships inside every release zip under
   `third-party-licenses/Qualcomm_LICENSE.pdf`, alongside Microsoft's
@@ -264,39 +267,46 @@ recompilation via AI Hub.
 
 ```
 openwritr-windows/
-├── src/             Rust native app (what users run)
-├── python/          Legacy v0.1 — current NPU fallback
-├── .venv/           gitignored; pip install onnxruntime-qnn happens here
-└── target/          gitignored; build output
+├── src/                   Rust native app
+├── scripts/               pinned runtime and release tooling
+├── models-manifest.json   pinned model assets and hashes
+├── runtime-manifest.json  pinned ORT/QNN wheels and compatibility tuple
+├── release-manifest.json  canonical per-architecture package contents
+└── target/                gitignored build and staging output
 ```
 
-`.venv` is build-time only. The shipped `openwritr.exe` does not call into
-Python at runtime.
+The shipped `openwritr.exe` does not call Python at runtime.
 
 ## Development
 
 ```powershell
 git clone https://github.com/trsdn/openwritr-windows.git
 cd openwritr-windows
-py -3.11-arm64 -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install onnxruntime-qnn
 .\scripts\envup.ps1
-cargo run --release --bin openwritr
+cargo build --release --bins
+python scripts/fetch_runtime.py --arch arm64
+python scripts/prepare_release.py --arch arm64
+target\stage\arm64\openwritr.exe --self-check
 ```
 
-For the Python NPU build, additionally:
+For x64 packaging, stage the CPU runtime with:
 
 ```powershell
-pip install -r python\requirements.txt
-python python\openwritr.py
+python scripts/fetch_runtime.py --arch x64
 ```
+
+See [`docs/RUNTIME_COMPATIBILITY.md`](docs/RUNTIME_COMPATIBILITY.md) for
+the shared ORT/QNN/QAIRT contract and its Snapdragon hardware gates.
 
 ## Releases
 
 Tagged releases live at
 [github.com/trsdn/openwritr-windows/releases](https://github.com/trsdn/openwritr-windows/releases).
-Each release ships a single zip containing `openwritr.exe`, the ONNX Runtime
-DLLs, the QNN runtime DLLs, this README, the MIT LICENSE, and a
-`third-party-licenses/` folder with the Qualcomm and Microsoft licence files
-for the bundled DLLs.
+Each architecture ships a ZIP and installer generated from the same validated
+release stage. CI also builds an unsigned Store `.msixbundle` as a workflow
+artifact for Partner Center ingestion, but does not attach it to the public
+GitHub release. Tagged builds use the repository variables
+`MSIX_IDENTITY_NAME` and `MSIX_PUBLISHER` when configured; otherwise the Store
+bundle is skipped rather than publishing a placeholder identity. Every package
+includes an `artifact-manifest.json`; CI verifies all required file hashes and
+confirms that x64 artifacts contain no Qualcomm runtime files.

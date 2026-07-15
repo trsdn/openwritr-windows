@@ -22,13 +22,13 @@
 //! - The hook is process-local for `WH_KEYBOARD_LL`; it sees every keystroke
 //!   that goes through SendInput / the keyboard driver, regardless of focus.
 
-use parking_lot::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
 use std::thread;
+use std::time::{Duration, Instant};
 use tracing::{info, warn};
 
 static EVENTS_SEEN: AtomicU64 = AtomicU64::new(0);
+static REINSTALL_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 /// Diagnostic: how many keyboard events the LL hook has processed since
 /// install. 0 after a press → hook isn't firing. Read from anywhere.
@@ -40,9 +40,8 @@ pub fn events_seen() -> u64 {
 use windows::Win32::{
     Foundation::{LPARAM, LRESULT, WPARAM},
     UI::WindowsAndMessaging::{
-        CallNextHookEx, DispatchMessageW, GetMessageW, SetWindowsHookExW, TranslateMessage,
-        UnhookWindowsHookEx, KBDLLHOOKSTRUCT, MSG, WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP,
-        WM_SYSKEYDOWN, WM_SYSKEYUP,
+        CallNextHookEx, DispatchMessageW, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx,
+        KBDLLHOOKSTRUCT, MSG, WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
     },
 };
 
@@ -70,7 +69,9 @@ impl State {
     }
 
     fn set(&self, vk: u32, down: bool) {
-        if vk > 255 { return; }
+        if vk > 255 {
+            return;
+        }
         let word = (vk / 64) as usize;
         let bit = 1u64 << (vk % 64);
         if down {
@@ -81,10 +82,18 @@ impl State {
     }
 
     fn is_down(&self, vk: u32) -> bool {
-        if vk > 255 { return false; }
+        if vk > 255 {
+            return false;
+        }
         let word = (vk / 64) as usize;
         let bit = 1u64 << (vk % 64);
         self.bits[word].load(Ordering::Relaxed) & bit != 0
+    }
+
+    fn clear(&self) {
+        for word in &self.bits {
+            word.store(0, Ordering::Relaxed);
+        }
     }
 }
 
@@ -101,9 +110,13 @@ pub fn install_once() {
     // Spawn a thread that installs the hook and runs the Windows message
     // loop. The hook is bound to the calling thread, so we must process
     // messages here for callbacks to fire.
-    let _ = thread::Builder::new()
+    if let Err(error) = thread::Builder::new()
         .name("kbd-hook".into())
-        .spawn(|| run_hook_thread());
+        .spawn(run_hook_thread)
+    {
+        INSTALLED.store(false, Ordering::SeqCst);
+        warn!(error = %error, "failed to spawn keyboard hook thread");
+    }
 }
 
 #[cfg(not(windows))]
@@ -112,9 +125,7 @@ fn run_hook_thread() {}
 #[cfg(windows)]
 fn run_hook_thread() {
     info!("kbd-hook thread starting, about to SetWindowsHookExW");
-    let hook = unsafe {
-        SetWindowsHookExW(WH_KEYBOARD_LL, Some(low_level_kbd_proc), None, 0)
-    };
+    let hook = unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(low_level_kbd_proc), None, 0) };
     let hook = match hook {
         Ok(h) => h,
         Err(e) => {
@@ -125,44 +136,32 @@ fn run_hook_thread() {
     };
     info!("LL keyboard hook installed");
 
-    // PeekMessage + small sleep instead of GetMessage. This lets us:
-    //   (a) Keep the thread responsive enough for the hook to fire (the system
-    //       gates LL hook callbacks on the thread being in a "ready" message
-    //       state, and PeekMessage qualifies just like GetMessage).
-    //   (b) Periodically detect "Windows silently unhooked us" — happens when
-    //       a single callback exceeds the LowLevelHooksTimeout (default 300 ms,
-    //       HKCU\Control Panel\Desktop). Symptom: hook handle still valid but
-    //       EVENTS_SEEN stays at 0 forever even though keys are being pressed
-    //       elsewhere in the system. We rearm by re-calling SetWindowsHookExW.
+    // PeekMessage + a small sleep keeps the thread in a ready message state
+    // while also allowing the hotkey health monitor to request a controlled
+    // reinstall after repeated, observed key-transition mismatches.
     use windows::Win32::UI::WindowsAndMessaging::{PeekMessageW, PM_REMOVE};
     unsafe {
         let mut msg = MSG::default();
         let mut current_hook = hook;
-        let mut last_check = std::time::Instant::now();
-        let mut last_events = 0u64;
         loop {
             while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
                 let _ = TranslateMessage(&msg);
                 DispatchMessageW(&msg);
             }
-            std::thread::sleep(std::time::Duration::from_millis(2));
+            std::thread::sleep(Duration::from_millis(2));
 
-            // Every ~5 s, if the event counter has not advanced at all
-            // (no key has hit the LL hook in 5 s — extremely unlikely on a
-            // machine the user is actively interacting with), the hook is
-            // probably dead. Reinstall.
-            if last_check.elapsed().as_secs() >= 5 {
-                let now = EVENTS_SEEN.load(Ordering::Relaxed);
-                if now == last_events {
-                    warn!("kbd-hook quiet for 5 s — Windows likely unhooked us; reinstalling");
-                    let _ = UnhookWindowsHookEx(current_hook);
-                    match SetWindowsHookExW(WH_KEYBOARD_LL, Some(low_level_kbd_proc), None, 0) {
-                        Ok(h) => { current_hook = h; info!("LL keyboard hook re-installed"); }
-                        Err(e) => { warn!(error = ?e, "re-install failed"); }
+            if REINSTALL_REQUESTED.swap(false, Ordering::AcqRel) {
+                match SetWindowsHookExW(WH_KEYBOARD_LL, Some(low_level_kbd_proc), None, 0) {
+                    Ok(replacement) => {
+                        let _ = UnhookWindowsHookEx(current_hook);
+                        current_hook = replacement;
+                        STATE.clear();
+                        info!("LL keyboard hook re-installed after confirmed mismatch");
+                    }
+                    Err(error) => {
+                        warn!(error = ?error, "keyboard hook re-install failed");
                     }
                 }
-                last_events = now;
-                last_check = std::time::Instant::now();
             }
         }
     }
@@ -188,7 +187,7 @@ unsafe extern "system" fn low_level_kbd_proc(
     let kb = &*(l_param.0 as *const KBDLLHOOKSTRUCT);
     let msg = w_param.0 as u32;
     let down = matches!(msg, x if x == WM_KEYDOWN || x == WM_SYSKEYDOWN);
-    let up   = matches!(msg, x if x == WM_KEYUP   || x == WM_SYSKEYUP);
+    let up = matches!(msg, x if x == WM_KEYUP   || x == WM_SYSKEYUP);
     if down || up {
         STATE.set(kb.vkCode, down);
     }
@@ -211,8 +210,147 @@ pub fn is_down(vk: u32) -> bool {
     }
 }
 
-// We keep `Arc<Mutex<_>>` imports usable even if the LL-hook path is the only
-// real consumer of this module — the cfg-not-windows fallback would otherwise
-// produce dead-code warnings.
-#[allow(dead_code)]
-fn _silence_dead_code(_: Arc<Mutex<()>>) {}
+pub fn request_reinstall() {
+    clear_held_state();
+    REINSTALL_REQUESTED.store(true, Ordering::Release);
+}
+
+pub fn clear_held_state() {
+    STATE.clear();
+}
+
+const MISSED_TRANSITIONS_BEFORE_RECOVERY: u8 = 3;
+const RECOVERY_COOLDOWN: Duration = Duration::from_secs(60);
+
+pub struct HealthMonitor {
+    tracked: Vec<TrackedKey>,
+    missed_transitions: u8,
+    last_recovery: Option<Instant>,
+}
+
+struct TrackedKey {
+    vk: u32,
+    secondary_down: bool,
+}
+
+impl HealthMonitor {
+    pub fn new(
+        keys: impl IntoIterator<Item = u32>,
+        mut secondary_down: impl FnMut(u32) -> bool,
+    ) -> Self {
+        let mut unique = Vec::new();
+        for vk in keys {
+            if vk != 0 && !unique.contains(&vk) {
+                unique.push(vk);
+            }
+        }
+        let tracked = unique
+            .into_iter()
+            .map(|vk| TrackedKey {
+                vk,
+                secondary_down: secondary_down(vk),
+            })
+            .collect();
+        Self {
+            tracked,
+            missed_transitions: 0,
+            last_recovery: None,
+        }
+    }
+
+    pub fn observe(
+        &mut self,
+        now: Instant,
+        mut secondary_down: impl FnMut(u32) -> bool,
+        mut hook_down: impl FnMut(u32) -> bool,
+    ) -> bool {
+        let mut matched_transition = false;
+        for tracked in &mut self.tracked {
+            let secondary = secondary_down(tracked.vk);
+            if secondary == tracked.secondary_down {
+                continue;
+            }
+            tracked.secondary_down = secondary;
+            if hook_down(tracked.vk) == secondary {
+                matched_transition = true;
+            } else {
+                self.missed_transitions = self.missed_transitions.saturating_add(1);
+            }
+        }
+        if matched_transition {
+            self.missed_transitions = 0;
+        }
+        let cooldown_elapsed = self
+            .last_recovery
+            .map(|last| now.saturating_duration_since(last) >= RECOVERY_COOLDOWN)
+            .unwrap_or(true);
+        if self.missed_transitions >= MISSED_TRANSITIONS_BEFORE_RECOVERY && cooldown_elapsed {
+            self.missed_transitions = 0;
+            self.last_recovery = Some(now);
+            true
+        } else {
+            false
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::HealthMonitor;
+    use std::collections::HashMap;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn long_keyboard_inactivity_never_requests_reinstall() {
+        let start = Instant::now();
+        let mut monitor = HealthMonitor::new([17], |_| false);
+        assert!(!monitor.observe(start + Duration::from_secs(600), |_| false, |_| false));
+    }
+
+    #[test]
+    fn repeated_missing_transitions_request_one_rate_limited_reinstall() {
+        let start = Instant::now();
+        let mut secondary = HashMap::from([(17_u32, false)]);
+        let mut monitor = HealthMonitor::new([17], |vk| secondary[&vk]);
+
+        for index in 0..2 {
+            secondary.insert(17, index % 2 == 0);
+            assert!(!monitor.observe(
+                start + Duration::from_secs(index + 1),
+                |vk| secondary[&vk],
+                |vk| !secondary[&vk],
+            ));
+        }
+        secondary.insert(17, true);
+        assert!(monitor.observe(
+            start + Duration::from_secs(3),
+            |vk| secondary[&vk],
+            |vk| !secondary[&vk],
+        ));
+
+        for index in 0..3 {
+            secondary.insert(17, index % 2 == 0);
+            assert!(!monitor.observe(
+                start + Duration::from_secs(4 + index),
+                |vk| secondary[&vk],
+                |vk| !secondary[&vk],
+            ));
+        }
+    }
+
+    #[test]
+    fn matching_transition_clears_suspicion() {
+        let start = Instant::now();
+        let mut secondary = false;
+        let mut monitor = HealthMonitor::new([17], |_| secondary);
+
+        secondary = true;
+        assert!(!monitor.observe(start, |_| secondary, |_| false));
+        secondary = false;
+        assert!(!monitor.observe(start + Duration::from_secs(1), |_| secondary, |_| false,));
+        secondary = true;
+        assert!(!monitor.observe(start + Duration::from_secs(2), |_| secondary, |_| true,));
+        secondary = false;
+        assert!(!monitor.observe(start + Duration::from_secs(3), |_| secondary, |_| true,));
+    }
+}

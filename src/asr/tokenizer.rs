@@ -27,9 +27,13 @@ impl Vocab {
                 continue;
             }
             // Split on the LAST space so tokens that contain spaces survive.
-            let Some(idx) = line.rfind(' ') else { continue; };
+            let Some(idx) = line.rfind(' ') else {
+                continue;
+            };
             let (tok, id_str) = (&line[..idx], &line[idx + 1..]);
-            let id: i32 = id_str.parse().with_context(|| format!("vocab id parse: {line}"))?;
+            let id: i32 = id_str
+                .parse()
+                .with_context(|| format!("vocab id parse: {line}"))?;
             let token = tok.replace('\u{2581}', " ");
             if tok == "<blk>" {
                 blank_id = id;
@@ -40,7 +44,11 @@ impl Vocab {
         if blank_id < 0 {
             anyhow::bail!("vocab missing <blk> token");
         }
-        Ok(Self { table, blank_id, size })
+        Ok(Self {
+            table,
+            blank_id,
+            size,
+        })
     }
 
     pub fn detokenize(&self, ids: &[i32]) -> String {

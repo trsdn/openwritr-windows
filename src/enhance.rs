@@ -2,6 +2,7 @@
 //!
 //! Blocking reqwest call so we can run it inline on the transcribe thread.
 
+use crate::credentials::read_openai_api_key;
 use crate::settings::Settings;
 use anyhow::{anyhow, Result};
 use parking_lot::Mutex;
@@ -23,14 +24,17 @@ pub fn enhance(text: &str, settings: &Settings) -> Result<String> {
     let (url, token) = match cfg.provider.as_str() {
         "github_copilot" => {
             let token = gh_token().ok_or_else(|| anyhow!("`gh auth token` empty"))?;
-            ("https://api.githubcopilot.com/chat/completions".to_string(), token)
+            (
+                "https://api.githubcopilot.com/chat/completions".to_string(),
+                token,
+            )
         }
         "openai_compatible" => {
-            if cfg.api_key.trim().is_empty() {
-                return Err(anyhow!("OpenAI api_key empty"));
-            }
+            let token = read_openai_api_key()?
+                .filter(|secret| !secret.trim().is_empty())
+                .ok_or_else(|| anyhow!("OpenAI-compatible API key is not configured"))?;
             let base = cfg.base_url.trim_end_matches('/');
-            (format!("{base}/chat/completions"), cfg.api_key.clone())
+            (format!("{base}/chat/completions"), token)
         }
         other => return Err(anyhow!("unknown provider {other}")),
     };
@@ -91,11 +95,16 @@ fn gh_token() -> Option<String> {
         .output()
         .ok()?;
     if !out.status.success() {
-        warn!("`gh auth token` failed: {}", String::from_utf8_lossy(&out.stderr));
+        warn!(
+            "`gh auth token` failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
         return None;
     }
     let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if s.is_empty() { return None; }
+    if s.is_empty() {
+        return None;
+    }
     *CACHE.lock() = Some((s.clone(), Instant::now()));
     Some(s)
 }

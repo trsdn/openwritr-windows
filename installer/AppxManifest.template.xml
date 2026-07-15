@@ -5,7 +5,7 @@
   Placeholders substituted by scripts/build_msix.ps1:
     {IDENTITY_NAME}   Package/Identity/Name from Partner Center
     {PUBLISHER}       Package/Identity/Publisher from Partner Center (CN=...)
-    {VERSION}         four-part version, e.g. 0.3.0.0
+    {VERSION}         four-part version, e.g. 0.4.0.0
     {ARCH}            x64 | arm64
 -->
 <Package

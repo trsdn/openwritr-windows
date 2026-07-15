@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "architectures": {
+    "arm64": {
+      "source_roots": {
+        "binary": "target/release",
+        "runtime": "target/release",
+        "repository": "."
+      },
+      "files": [
+        { "source_root": "binary", "source": "openwritr.exe", "target": "openwritr.exe", "kind": "pe" },
+        { "source_root": "runtime", "source": "runtime-versions.json", "target": "runtime-versions.json", "kind": "runtime_receipt" },
+        { "source_root": "runtime", "source": "onnxruntime.dll", "target": "onnxruntime.dll", "kind": "pe" },
+        { "source_root": "runtime", "source": "onnxruntime_providers_qnn.dll", "target": "onnxruntime_providers_qnn.dll", "kind": "pe" },
+        { "source_root": "runtime", "source": "QnnHtp.dll", "target": "QnnHtp.dll", "kind": "pe" },
+        { "source_root": "runtime", "source": "QnnHtpPrepare.dll", "target": "QnnHtpPrepare.dll", "kind": "pe" },
+        { "source_root": "runtime", "source": "QnnHtpNetRunExtensions.dll", "target": "QnnHtpNetRunExtensions.dll", "kind": "pe" },
+        { "source_root": "runtime", "source": "QnnHtpV73Stub.dll", "target": "QnnHtpV73Stub.dll", "kind": "pe" },
+        { "source_root": "runtime", "source": "libQnnHtpV73Skel.so", "target": "libQnnHtpV73Skel.so", "kind": "file" },
+        { "source_root": "runtime", "source": "libqnnhtpv73.cat", "target": "libqnnhtpv73.cat", "kind": "file" },
+        { "source_root": "runtime", "source": "QnnSystem.dll", "target": "QnnSystem.dll", "kind": "pe" },
+        { "source_root": "runtime", "source": "third-party-licenses/onnxruntime-LICENSE.txt", "target": "third-party-licenses/onnxruntime-LICENSE.txt", "kind": "file" },
+        { "source_root": "runtime", "source": "third-party-licenses/onnxruntime-ThirdPartyNotices.txt", "target": "third-party-licenses/onnxruntime-ThirdPartyNotices.txt", "kind": "file" },
+        { "source_root": "runtime", "source": "third-party-licenses/onnxruntime-Privacy.md", "target": "third-party-licenses/onnxruntime-Privacy.md", "kind": "file" },
+        { "source_root": "runtime", "source": "third-party-licenses/onnxruntime-qnn-LICENSE.txt", "target": "third-party-licenses/onnxruntime-qnn-LICENSE.txt", "kind": "file" },
+        { "source_root": "runtime", "source": "third-party-licenses/onnxruntime-qnn-ThirdPartyNotices.txt", "target": "third-party-licenses/onnxruntime-qnn-ThirdPartyNotices.txt", "kind": "file" },
+        { "source_root": "runtime", "source": "third-party-licenses/onnxruntime-qnn-Privacy.md", "target": "third-party-licenses/onnxruntime-qnn-Privacy.md", "kind": "file" },
+        { "source_root": "runtime", "source": "third-party-licenses/Qualcomm_LICENSE.pdf", "target": "third-party-licenses/Qualcomm_LICENSE.pdf", "kind": "file" },
+        { "source_root": "repository", "source": "README.md", "target": "README.md", "kind": "file" },
+        { "source_root": "repository", "source": "LICENSE", "target": "LICENSE", "kind": "file" }
+      ],
+      "optional_files": [],
+      "forbidden_files": []
+    },
+    "x64": {
+      "source_roots": {
+        "binary": "target/x86_64-pc-windows-msvc/release",
+        "runtime": "vendor/x64",
+        "repository": "."
+      },
+      "files": [
+        { "source_root": "binary", "source": "openwritr.exe", "target": "openwritr.exe", "kind": "pe" },
+        { "source_root": "runtime", "source": "runtime-versions.json", "target": "runtime-versions.json", "kind": "runtime_receipt" },
+        { "source_root": "runtime", "source": "onnxruntime.dll", "target": "onnxruntime.dll", "kind": "pe" },
+        { "source_root": "runtime", "source": "third-party-licenses/onnxruntime-LICENSE.txt", "target": "third-party-licenses/onnxruntime-LICENSE.txt", "kind": "file" },
+        { "source_root": "runtime", "source": "third-party-licenses/onnxruntime-ThirdPartyNotices.txt", "target": "third-party-licenses/onnxruntime-ThirdPartyNotices.txt", "kind": "file" },
+        { "source_root": "runtime", "source": "third-party-licenses/onnxruntime-Privacy.md", "target": "third-party-licenses/onnxruntime-Privacy.md", "kind": "file" },
+        { "source_root": "repository", "source": "README.md", "target": "README.md", "kind": "file" },
+        { "source_root": "repository", "source": "LICENSE", "target": "LICENSE", "kind": "file" }
+      ],
+      "optional_files": [],
+      "forbidden_files": [
+        "onnxruntime_providers_qnn.dll",
+        "QnnHtp.dll",
+        "QnnHtpPrepare.dll",
+        "QnnHtpNetRunExtensions.dll",
+        "QnnHtpV73Stub.dll",
+        "libQnnHtpV73Skel.so",
+        "libqnnhtpv73.cat",
+        "QnnSystem.dll"
+      ]
+    }
+  }
+}

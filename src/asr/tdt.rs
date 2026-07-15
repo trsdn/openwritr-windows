@@ -46,7 +46,7 @@ impl Tdt {
     pub fn decode(
         &self,
         decoder: &mut Session,
-        encoder_out: &ndarray::Array3<f32>,    // (1, T, D) after transpose
+        encoder_out: &ndarray::Array3<f32>, // (1, T, D) after transpose
         encoder_out_len: usize,
     ) -> Result<Vec<i32>> {
         let mut state = self.init_state(decoder)?;
@@ -57,9 +57,9 @@ impl Tdt {
         while t < encoder_out_len {
             // (1, D, 1) — single encoder frame
             let enc_t = encoder_out
-                .index_axis(Axis(1), t)        // (1, D)
+                .index_axis(Axis(1), t) // (1, D)
                 .to_owned();
-            let enc_t = enc_t.insert_axis(Axis(2));   // (1, D, 1)
+            let enc_t = enc_t.insert_axis(Axis(2)); // (1, D, 1)
 
             let prev_token = *tokens.last().unwrap_or(&self.blank_id);
             let targets = Array2::<i32>::from_elem((1, 1), prev_token);
@@ -76,18 +76,21 @@ impl Tdt {
             let logits = outs
                 .get("outputs")
                 .ok_or_else(|| anyhow!("decoder missing 'outputs'"))?
-                .try_extract_array::<f32>().ortx()?
+                .try_extract_array::<f32>()
+                .ortx()?
                 .to_owned();
             let s1 = outs
                 .get("output_states_1")
                 .ok_or_else(|| anyhow!("decoder missing output_states_1"))?
-                .try_extract_array::<f32>().ortx()?
+                .try_extract_array::<f32>()
+                .ortx()?
                 .to_owned()
                 .into_dimensionality::<Ix3>()?;
             let s2 = outs
                 .get("output_states_2")
                 .ok_or_else(|| anyhow!("decoder missing output_states_2"))?
-                .try_extract_array::<f32>().ortx()?
+                .try_extract_array::<f32>()
+                .ortx()?
                 .to_owned()
                 .into_dimensionality::<Ix3>()?;
 
@@ -111,7 +114,10 @@ impl Tdt {
 
             if token != self.blank_id {
                 tokens.push(token);
-                state = DecoderState { state1: s1, state2: s2 };
+                state = DecoderState {
+                    state1: s1,
+                    state2: s2,
+                };
                 emitted_this_step += 1;
             }
 
@@ -158,4 +164,6 @@ fn find_shape(inputs: &[Outlet], name: &str) -> Result<(usize, usize, usize)> {
 }
 
 #[allow(dead_code)]
-fn _phantom() -> ArrayD<f32> { ArrayD::<f32>::zeros(ndarray::IxDyn(&[])) }
+fn _phantom() -> ArrayD<f32> {
+    ArrayD::<f32>::zeros(ndarray::IxDyn(&[]))
+}
