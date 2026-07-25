@@ -1,9 +1,9 @@
 # OpenWritr Privacy Policy
 
-*Last updated: June 2026*
+*Last updated: July 2026*
 
-OpenWritr is a push-to-talk voice-to-text tool that runs **entirely on your
-device**.
+OpenWritr is a local-first push-to-talk voice-to-text tool. Audio capture and
+speech recognition run **entirely on your device**.
 
 ## What we collect
 
@@ -15,8 +15,9 @@ servers operated by us.
 - Audio is captured from your microphone **only while you hold the hotkey**.
 - Transcription runs **locally on your device** (NVIDIA Parakeet model on
   your CPU or NPU). Your audio never leaves your machine.
-- The recognized text is pasted at your cursor and is not stored by
-  OpenWritr beyond that.
+- The recognized text is pasted at your cursor or copied to the Windows
+  clipboard, depending on your Settings choice. OpenWritr does not keep a
+  transcript history.
 
 ## Network access
 
@@ -25,12 +26,12 @@ OpenWritr connects to the internet only for:
 1. **One-time model download** from Hugging Face (`huggingface.co`) on first
    launch — this fetches the speech-recognition model files. No personal
    data is sent; this is a plain file download.
-2. **Optional text cleanup ("Enhance")** — *off by default*. If you enable
-   it and configure a provider (GitHub Copilot or an OpenAI-compatible API),
-   the **recognized text** (not audio) is sent to that provider for
-   grammar/punctuation cleanup using **your own API credentials**. The
-   provider's own privacy policy applies to that processing. Disable the
-   Enhance feature to keep everything 100% local.
+2. **Optional text cleanup ("Enhance")** — *off by default*. You can run it
+   only when Shift is additionally held or for every recording. If enabled,
+   the **recognized text** (never audio) is sent to GitHub Copilot or your
+   configured OpenAI-compatible API for grammar and punctuation cleanup using
+   your own credentials. The provider's privacy policy applies. Set enhancement
+   to **Never** to keep all processing local.
 
 ## Data stored on your device
 

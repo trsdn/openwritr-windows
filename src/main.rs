@@ -1,4 +1,4 @@
-//! OpenWritr — push-to-talk voice-to-text for Windows on ARM (native build).
+//! OpenWritr — native push-to-talk voice-to-text for Windows.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 

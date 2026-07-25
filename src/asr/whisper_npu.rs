@@ -26,7 +26,7 @@ pub struct WhisperNpuEngine {
 
 impl WhisperNpuEngine {
     pub fn load_from(model_dir: PathBuf) -> Result<Self> {
-        ensure_supported_hardware()?;
+        super::hardware::ensure_engine_supported("whisper_npu")?;
 
         let tokenizer = WhisperTokenizer::load(&model_dir)
             .with_context(|| format!("load Whisper tokenizer from {}", model_dir.display()))?;
@@ -157,97 +157,6 @@ fn load_session(
         .with_context(|| format!("load Whisper NPU session {}", path.display()))
 }
 
-fn ensure_supported_hardware() -> Result<()> {
-    #[cfg(not(target_arch = "aarch64"))]
-    {
-        bail!("Whisper NPU requires the ARM64 build on Snapdragon X Elite");
-    }
-    #[cfg(all(target_arch = "aarch64", not(windows)))]
-    {
-        bail!("Whisper NPU requires Windows on Snapdragon X Elite");
-    }
-    #[cfg(all(target_arch = "aarch64", windows))]
-    {
-        let processor = processor_name()?;
-        if !is_snapdragon_x_elite(&processor) {
-            bail!("Whisper NPU requires Snapdragon X Elite; detected processor: {processor}");
-        }
-        info!(processor, "supported Whisper NPU hardware detected");
-        Ok(())
-    }
-}
-
-pub(super) fn hardware_status() -> Result<String> {
-    #[cfg(not(target_arch = "aarch64"))]
-    {
-        return Ok("unavailable: Whisper NPU requires ARM64 Snapdragon X Elite".to_string());
-    }
-    #[cfg(all(target_arch = "aarch64", not(windows)))]
-    {
-        return Ok("unavailable: Whisper NPU requires Windows".to_string());
-    }
-    #[cfg(all(target_arch = "aarch64", windows))]
-    {
-        let processor = processor_name()?;
-        let state = if is_snapdragon_x_elite(&processor) {
-            "supported"
-        } else {
-            "unsupported"
-        };
-        Ok(format!("{state}: {processor}"))
-    }
-}
-
-#[cfg(any(target_arch = "aarch64", test))]
-fn is_snapdragon_x_elite(processor: &str) -> bool {
-    let processor = processor.to_ascii_lowercase();
-    processor.contains("snapdragon") && (processor.contains("x elite") || processor.contains("x1e"))
-}
-
-#[cfg(all(target_arch = "aarch64", windows))]
-fn processor_name() -> Result<String> {
-    use windows::core::w;
-    use windows::Win32::System::Registry::{RegGetValueW, HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ};
-
-    let mut bytes = 0_u32;
-    unsafe {
-        RegGetValueW(
-            HKEY_LOCAL_MACHINE,
-            w!("HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0"),
-            w!("ProcessorNameString"),
-            RRF_RT_REG_SZ,
-            None,
-            None,
-            Some(&mut bytes),
-        )
-        .ok()
-        .context("read Snapdragon processor name size")?;
-    }
-    if bytes < 2 {
-        bail!("Windows returned an empty processor name");
-    }
-
-    let mut buffer = vec![0_u16; (bytes as usize).div_ceil(2)];
-    unsafe {
-        RegGetValueW(
-            HKEY_LOCAL_MACHINE,
-            w!("HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0"),
-            w!("ProcessorNameString"),
-            RRF_RT_REG_SZ,
-            None,
-            Some(buffer.as_mut_ptr().cast()),
-            Some(&mut bytes),
-        )
-        .ok()
-        .context("read Snapdragon processor name")?;
-    }
-    let length = buffer
-        .iter()
-        .position(|value| *value == 0)
-        .unwrap_or(buffer.len());
-    String::from_utf16(&buffer[..length]).context("decode Snapdragon processor name")
-}
-
 fn validate_sample_rate(sample_rate: u32) -> Result<()> {
     if sample_rate == 0 {
         bail!("cannot transcribe audio with a zero sample rate");
@@ -271,15 +180,5 @@ mod tests {
     fn chunk_size_is_exactly_thirty_seconds() {
         assert_eq!(CHUNK_SAMPLES, 480_000);
         assert_eq!(480_001usize.div_ceil(CHUNK_SAMPLES), 2);
-    }
-
-    #[test]
-    fn recognizes_only_snapdragon_x_elite_processor_names() {
-        assert!(is_snapdragon_x_elite(
-            "Snapdragon(R) X 12-core X1E80100 @ 3.40 GHz"
-        ));
-        assert!(is_snapdragon_x_elite("Qualcomm Snapdragon X Elite"));
-        assert!(!is_snapdragon_x_elite("Snapdragon X Plus X1P64100"));
-        assert!(!is_snapdragon_x_elite("Intel Core Ultra"));
     }
 }

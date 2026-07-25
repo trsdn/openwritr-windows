@@ -76,35 +76,42 @@ about 2.2 GB after extraction.
 | Combo | Action |
 |---|---|
 | **Hold Ctrl + Win** | Record. Release to transcribe and paste at the caret. |
-| **Hold Ctrl + Shift + Win** | Record + LLM cleanup (Claude Haiku 4.5 by default). |
+| **Optional: hold the configured shortcut + Shift** | Run text cleanup when enhancement mode is set to **Additional Shift**. |
 | **Tray right-click → Settings** | Change hotkey, engine, LLM provider. |
 
 A small dark pill appears at the bottom-center of the primary monitor while
-recording, with white bars that breathe with your voice. Settings changes take
-effect immediately — no restart required.
+recording, with white bars that breathe with your voice. It also shows short
+status and error messages. Settings changes take effect after saving — no
+restart required.
 
 ## Settings
 
 Tray icon → right-click → **Settings**. All fields:
 
-- **Hotkey**: any combination of Ctrl / Shift / Alt / Win modifiers, plus an
-  optional trigger key (Space, Tab, Caps Lock, F13-F20, or `None` for
-  modifiers-only). Default: Ctrl+Win, no trigger.
+- **Recording shortcut**: Ctrl / Shift / Alt / Win modifiers plus an optional
+  trigger key. Modifier-only shortcuts require at least two modifiers; F13-F20
+  may be used alone. The dialog shows a live shortcut preview and prevents
+  ambiguous Shift-enhancement combinations. Default: Ctrl+Win.
 - **Transcription engine**: Parakeet CPU INT8 (default), Parakeet NPU, or
-  Whisper Large v3 Turbo NPU. NPU engines require the native ARM64 build on
-  Snapdragon X Elite. A selected engine failure is shown explicitly;
-  OpenWritr never silently substitutes another engine.
-- **Behaviour**: auto-paste at cursor, show overlay while recording, play
-  start/stop sounds.
-- **Enhance**: provider (Off / GitHub Copilot / OpenAI-compatible API), model
-  dropdown (Claude Haiku 4.5, GPT-5 Mini, GPT-4.1) or free-form custom model
-  name, base URL + API key (OpenAI-compatible only). API keys are stored in
-  Windows Credential Manager, not in the settings file.
+  Whisper Large v3 Turbo NPU. Each choice shows hardware availability,
+  first-use download size, and local cache status. NPU engines remain visible
+  but disabled unless the ARM64 build is running on Snapdragon X Elite.
+- **Output and feedback**: either paste into the active app or keep the
+  transcript on the clipboard. The overlay option covers both the recording
+  waveform and status messages. Start/stop sounds are optional.
+- **Text enhancement**: choose **Never**, **When Shift is additionally held**,
+  or **Always**, then select GitHub Copilot or an OpenAI-compatible API.
+  GitHub mode checks that `gh` is installed and authenticated. OpenAI-compatible
+  mode requires a valid base URL, model ID, and API key. API keys are stored in
+  Windows Credential Manager, not in the settings file. If cleanup fails, the
+  raw transcript is still delivered and OpenWritr shows a warning.
+- **Advanced**: set the maximum recording duration.
 
 Settings are stored at `%LOCALAPPDATA%\OpenWritr\settings.json`. The app polls
 the file's mtime so external edits also take effect live. Writes use an atomic
 replacement, and legacy plaintext API keys are migrated only after the secure
-credential can be written and read back successfully.
+credential can be written and read back successfully. Unsaved changes require
+confirmation before the Settings window closes.
 
 ## Architecture
 

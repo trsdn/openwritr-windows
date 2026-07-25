@@ -1,7 +1,7 @@
 use crate::paths;
 use anyhow::{anyhow, Context};
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::fs::{self, File};
@@ -58,6 +58,20 @@ impl ModelState {
             Self::Cancelled => format!("{model_id}: model download cancelled"),
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ModelCacheState {
+    Missing,
+    Installed,
+    Incomplete,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModelInfo {
+    pub id: String,
+    pub download_bytes: u64,
+    pub cache_state: ModelCacheState,
 }
 
 #[derive(Clone, Default)]
@@ -197,6 +211,10 @@ impl ModelManager {
         parse_embedded_manifest().map(|_| ())
     }
 
+    pub fn inspect(model_id: &str) -> Result<ModelInfo, ModelError> {
+        inspect_model_at(&paths::models_dir(), model_id)
+    }
+
     pub fn ensure<F>(
         &self,
         model_id: &str,
@@ -250,6 +268,20 @@ impl ModelManager {
             emit(ModelState::Verifying);
             match validate_directory(model, &target, cancellation) {
                 Ok(()) => {
+                    if !receipt_matches(&target, self.manifest.schema_version, model) {
+                        match write_receipt(model, &target, self.manifest.schema_version) {
+                            Ok(()) => info!(
+                                model = model.id,
+                                version = model.version,
+                                "model receipt repaired"
+                            ),
+                            Err(error) => warn!(
+                                model = model.id,
+                                error = %error,
+                                "model cache is valid, but its receipt could not be repaired"
+                            ),
+                        }
+                    }
                     info!(
                         model = model.id,
                         version = model.version,
@@ -453,6 +485,57 @@ impl ModelManager {
             space_probe,
         })
     }
+}
+
+fn inspect_model_at(root: &Path, model_id: &str) -> Result<ModelInfo, ModelError> {
+    let manifest = parse_embedded_manifest()?;
+    let model = manifest
+        .models
+        .iter()
+        .find(|model| model.id == model_id)
+        .ok_or_else(|| ModelError::from(anyhow!("unknown model {model_id}")))?;
+    inspect_manifest_model(root, manifest.schema_version, model)
+}
+
+fn inspect_manifest_model(
+    root: &Path,
+    schema_version: u32,
+    model: &ModelManifest,
+) -> Result<ModelInfo, ModelError> {
+    let directory = root.join(&model.local_dir);
+    let cache_state = if !directory.exists() {
+        ModelCacheState::Missing
+    } else if !directory.is_dir()
+        || !expected_files(model).into_iter().all(|(path, bytes, _)| {
+            directory
+                .join(path)
+                .metadata()
+                .map(|metadata| metadata.is_file() && metadata.len() == bytes)
+                .unwrap_or(false)
+        })
+        || !receipt_matches(&directory, schema_version, model)
+    {
+        ModelCacheState::Incomplete
+    } else {
+        ModelCacheState::Installed
+    };
+    Ok(ModelInfo {
+        id: model.id.clone(),
+        download_bytes: network_bytes(model)?,
+        cache_state,
+    })
+}
+
+fn receipt_matches(directory: &Path, schema_version: u32, model: &ModelManifest) -> bool {
+    let Ok(bytes) = fs::read(directory.join("model-receipt.json")) else {
+        return false;
+    };
+    let Ok(receipt) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        return false;
+    };
+    receipt.get("schema_version").and_then(Value::as_u64) == Some(schema_version as u64)
+        && receipt.get("model_id").and_then(Value::as_str) == Some(model.id.as_str())
+        && receipt.get("version").and_then(Value::as_str) == Some(model.version.as_str())
 }
 
 pub fn diagnostic_status(root: &Path) -> anyhow::Result<serde_json::Value> {
@@ -1075,6 +1158,57 @@ mod tests {
             Arc::new(|_| Ok(u64::MAX)),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn inspects_missing_incomplete_and_installed_model_caches_without_hashing() {
+        let temp = tempfile::tempdir().unwrap();
+        let content = b"verified model";
+        let manifest = direct_manifest("https://example.test/model", content, sha256(content));
+        let model = &manifest.models[0];
+
+        let missing = inspect_manifest_model(temp.path(), manifest.schema_version, model).unwrap();
+        assert_eq!(missing.cache_state, ModelCacheState::Missing);
+        assert_eq!(missing.download_bytes, content.len() as u64);
+
+        let directory = temp.path().join(&model.local_dir);
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(directory.join("model.bin"), content).unwrap();
+        let incomplete =
+            inspect_manifest_model(temp.path(), manifest.schema_version, model).unwrap();
+        assert_eq!(incomplete.cache_state, ModelCacheState::Incomplete);
+
+        write_receipt(model, &directory, manifest.schema_version).unwrap();
+        let installed =
+            inspect_manifest_model(temp.path(), manifest.schema_version, model).unwrap();
+        assert_eq!(installed.cache_state, ModelCacheState::Installed);
+    }
+
+    #[test]
+    fn verified_existing_cache_repairs_a_missing_receipt() {
+        let temp = tempfile::tempdir().unwrap();
+        let content = b"verified model";
+        let manifest = direct_manifest("https://example.test/model", content, sha256(content));
+        let target = temp.path().join(&manifest.models[0].local_dir);
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join("model.bin"), content).unwrap();
+        let manager = manager(
+            temp.path(),
+            manifest.clone(),
+            Arc::new(MemorySource::default()),
+        );
+
+        manager
+            .ensure("test", &CancellationToken::default(), |_| {})
+            .unwrap();
+
+        assert!(target.join("model-receipt.json").is_file());
+        assert_eq!(
+            inspect_manifest_model(temp.path(), manifest.schema_version, &manifest.models[0])
+                .unwrap()
+                .cache_state,
+            ModelCacheState::Installed
+        );
     }
 
     #[test]

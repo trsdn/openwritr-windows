@@ -1,31 +1,63 @@
+use anyhow::{anyhow, Context, Result};
 use arboard::Clipboard;
 use enigo::{Direction, Enigo, Key, Keyboard, Settings as EnigoSettings};
 use std::thread;
 use std::time::Duration;
-use tracing::warn;
 use windows_sys::Win32::System::DataExchange::GetClipboardSequenceNumber;
 
-pub fn paste(text: &str) {
-    let mut clipboard = match Clipboard::new() {
-        Ok(clipboard) => clipboard,
-        Err(error) => {
-            warn!(error = %error, "clipboard open failed");
-            return;
-        }
-    };
-    let saved = clipboard.get_text().ok();
-    if clipboard.set_text(text.to_string()).is_err() {
-        warn!("clipboard write failed");
-        return;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeliveryMode {
+    Paste,
+    Clipboard,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeliveryOutcome {
+    Pasted,
+    Copied,
+}
+
+pub fn deliver(text: &str, mode: DeliveryMode) -> Result<DeliveryOutcome> {
+    match mode {
+        DeliveryMode::Paste => paste(text),
+        DeliveryMode::Clipboard => copy(text),
     }
+}
+
+fn copy(text: &str) -> Result<DeliveryOutcome> {
+    let mut clipboard = Clipboard::new().context("open the Windows clipboard")?;
+    clipboard
+        .set_text(text.to_string())
+        .context("write the transcript to the Windows clipboard")?;
+    Ok(DeliveryOutcome::Copied)
+}
+
+fn paste(text: &str) -> Result<DeliveryOutcome> {
+    let mut clipboard = Clipboard::new().context("open the Windows clipboard")?;
+    let saved = clipboard.get_text().ok();
+    clipboard
+        .set_text(text.to_string())
+        .context("write the transcript to the Windows clipboard")?;
     let transcript_sequence = unsafe { GetClipboardSequenceNumber() };
 
-    if let Ok(mut enigo) = Enigo::new(&EnigoSettings::default()) {
-        let _ = enigo.key(Key::Control, Direction::Press);
-        let _ = enigo.key(Key::Unicode('v'), Direction::Click);
+    let mut enigo = Enigo::new(&EnigoSettings::default())
+        .map_err(|error| anyhow!("could not initialize keyboard paste: {error}"))?;
+    let paste_result = (|| {
+        enigo
+            .key(Key::Control, Direction::Press)
+            .context("press Ctrl for paste")?;
+        enigo
+            .key(Key::Unicode('v'), Direction::Click)
+            .context("press V for paste")?;
+        enigo
+            .key(Key::Control, Direction::Release)
+            .context("release Ctrl after paste")
+    })();
+    if let Err(error) = paste_result {
         let _ = enigo.key(Key::Control, Direction::Release);
-    } else {
-        warn!("enigo init failed");
+        return Err(anyhow!(
+            "{error}; the transcript remains on the Windows clipboard"
+        ));
     }
 
     if let Some(previous) = saved {
@@ -41,6 +73,7 @@ pub fn paste(text: &str) {
             }
         });
     }
+    Ok(DeliveryOutcome::Pasted)
 }
 
 fn should_restore(transcript_sequence: u32, current_sequence: u32) -> bool {
@@ -49,12 +82,17 @@ fn should_restore(transcript_sequence: u32, current_sequence: u32) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::should_restore;
+    use super::{should_restore, DeliveryMode};
 
     #[test]
     fn restores_only_when_the_clipboard_is_unchanged() {
         assert!(should_restore(42, 42));
         assert!(!should_restore(42, 43));
         assert!(!should_restore(0, 0));
+    }
+
+    #[test]
+    fn delivery_modes_are_explicit() {
+        assert_ne!(DeliveryMode::Paste, DeliveryMode::Clipboard);
     }
 }

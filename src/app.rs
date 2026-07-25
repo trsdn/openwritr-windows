@@ -12,7 +12,7 @@ use crate::{
     diagnostics, hotkey, key_hook,
     model_manager::ModelState,
     overlay, paste, paths,
-    settings::{CredentialHealth, Settings},
+    settings::{CredentialHealth, EnhanceMode, Settings},
     sounds, tray,
     worker::{ShutdownMode, Worker, WorkerEvent},
 };
@@ -218,7 +218,11 @@ fn hotkey_loop(initial: Settings, proxy: EventLoopProxy<UserEvent>, stop: Arc<At
                 hotkey::Event::Press => UserEvent::HotkeyPress,
                 hotkey::Event::Release => {
                     let shift_is_modifier = settings.hotkey_modifiers.iter().any(|m| m == "shift");
-                    let enhance = !shift_is_modifier && shift_currently_down();
+                    let enhance = should_request_enhancement(
+                        settings.enhance.mode,
+                        shift_is_modifier,
+                        shift_currently_down(),
+                    );
                     UserEvent::HotkeyRelease { enhance }
                 }
             };
@@ -371,7 +375,18 @@ impl AppHandler {
                     .map(|started| started.elapsed().as_secs_f32() >= max_seconds)
                     .unwrap_or(false);
                 if self.state.recorder.limit_reached() || timer_limit_reached {
-                    self.finish_recording(false, true);
+                    let shift_is_modifier = self
+                        .state
+                        .settings
+                        .hotkey_modifiers
+                        .iter()
+                        .any(|modifier| modifier == "shift");
+                    let enhance = should_request_enhancement(
+                        self.state.settings.enhance.mode,
+                        shift_is_modifier,
+                        shift_currently_down(),
+                    );
+                    self.finish_recording(enhance, true);
                 }
             }
         }
@@ -643,6 +658,18 @@ fn shift_currently_down() -> bool {
     unsafe { (GetAsyncKeyState(VK_SHIFT.0 as i32) as u32) & 0x8000 != 0 }
 }
 
+fn should_request_enhancement(
+    mode: EnhanceMode,
+    shift_is_modifier: bool,
+    shift_is_down: bool,
+) -> bool {
+    match mode {
+        EnhanceMode::Never => false,
+        EnhanceMode::WithShift => !shift_is_modifier && shift_is_down,
+        EnhanceMode::Always => true,
+    }
+}
+
 impl AppHandler {
     fn dispatch_transcribe(&mut self, samples: Vec<f32>, sr: u32, enhance_requested: bool) {
         if self.state.shutting_down {
@@ -767,12 +794,52 @@ impl AppHandler {
                 id,
                 text,
                 auto_paste,
+                enhancement_warning,
             } => {
                 self.finish_job(id);
-                if auto_paste && !text.is_empty() {
-                    paste::paste(&text);
-                }
                 self.update_job_status();
+                if text.is_empty() {
+                    return;
+                }
+                let mode = if auto_paste {
+                    paste::DeliveryMode::Paste
+                } else {
+                    paste::DeliveryMode::Clipboard
+                };
+                match paste::deliver(&text, mode) {
+                    Ok(paste::DeliveryOutcome::Pasted) => {
+                        if let Some(warning) = enhancement_warning {
+                            self.show_job_warning(&format!(
+                                "Enhancement failed; raw transcript was pasted: {}",
+                                short_error(&warning)
+                            ));
+                        }
+                    }
+                    Ok(paste::DeliveryOutcome::Copied) => {
+                        if let Some(warning) = enhancement_warning {
+                            self.show_job_warning(&format!(
+                                "Enhancement failed; raw transcript was copied: {}",
+                                short_error(&warning)
+                            ));
+                        } else {
+                            self.state.tray.set_status(
+                                tray::IconColor::Idle,
+                                "OpenWritr — copied transcript to clipboard",
+                            );
+                            if let Err(error) = self
+                                .state
+                                .overlay
+                                .show_status("Copied transcript to clipboard")
+                            {
+                                warn!(error, "failed to show clipboard status");
+                            }
+                        }
+                    }
+                    Err(error) => self.show_job_warning(&format!(
+                        "Transcript delivery failed: {}",
+                        short_error(&error.to_string())
+                    )),
+                }
             }
             WorkerEvent::JobFailed { id, error } => {
                 self.finish_job(id);
@@ -847,6 +914,15 @@ impl AppHandler {
                     EngineState::Failed { .. } => unreachable!(),
                 }
             }
+        }
+    }
+
+    fn show_job_warning(&self, message: &str) {
+        self.state
+            .tray
+            .set_status(tray::IconColor::Error, &format!("OpenWritr — {message}"));
+        if let Err(error) = self.state.overlay.show_status(message) {
+            warn!(error, "failed to show job warning");
         }
     }
 
@@ -961,5 +1037,32 @@ fn prompt_shutdown_mode(pending_jobs: usize) -> ShutdownMode {
         ShutdownMode::Discard
     } else {
         ShutdownMode::Wait
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_request_enhancement;
+    use crate::settings::EnhanceMode;
+
+    #[test]
+    fn enhancement_modes_choose_never_shift_or_always() {
+        assert!(!should_request_enhancement(EnhanceMode::Never, false, true));
+        assert!(should_request_enhancement(
+            EnhanceMode::WithShift,
+            false,
+            true
+        ));
+        assert!(!should_request_enhancement(
+            EnhanceMode::WithShift,
+            false,
+            false
+        ));
+        assert!(!should_request_enhancement(
+            EnhanceMode::WithShift,
+            true,
+            true
+        ));
+        assert!(should_request_enhancement(EnhanceMode::Always, true, false));
     }
 }

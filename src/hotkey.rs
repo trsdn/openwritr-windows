@@ -186,10 +186,15 @@ pub struct PollState {
 /// without RegisterHotKey. If `trigger_vk` is 0, the combo fires on
 /// modifiers-only.
 pub fn poll_combo(trigger_vk: u32, mod_vks: &[u32], state: &mut PollState) -> Option<Event> {
-    let trigger_down = trigger_vk == 0 || configured_key_down(trigger_vk);
-    let mods_down = !mod_vks.is_empty() && mod_vks.iter().all(|&vk| configured_key_down(vk));
-    let combo = trigger_down && mods_down;
+    let combo = combo_is_down(trigger_vk, mod_vks, configured_key_down);
     update_combo_state(combo, state)
+}
+
+fn combo_is_down(trigger_vk: u32, mod_vks: &[u32], key_down: impl Fn(u32) -> bool) -> bool {
+    let has_configured_key = trigger_vk != 0 || !mod_vks.is_empty();
+    let trigger_down = trigger_vk == 0 || key_down(trigger_vk);
+    let mods_down = mod_vks.iter().all(|&vk| key_down(vk));
+    has_configured_key && trigger_down && mods_down
 }
 
 fn update_combo_state(combo: bool, state: &mut PollState) -> Option<Event> {
@@ -206,7 +211,14 @@ fn update_combo_state(combo: bool, state: &mut PollState) -> Option<Event> {
 
 #[cfg(test)]
 mod tests {
-    use super::{update_combo_state, Event, PollState};
+    use super::{combo_is_down, update_combo_state, Event, PollState};
+
+    #[test]
+    fn standalone_trigger_does_not_require_modifiers() {
+        assert!(combo_is_down(13, &[], |vk| vk == 13));
+        assert!(!combo_is_down(13, &[], |_| false));
+        assert!(!combo_is_down(0, &[], |_| true));
+    }
 
     #[test]
     fn combo_edges_remain_correct_after_recovery_reset() {

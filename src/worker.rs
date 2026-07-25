@@ -45,6 +45,7 @@ pub enum WorkerEvent {
         id: u64,
         text: String,
         auto_paste: bool,
+        enhancement_warning: Option<String>,
     },
     JobFailed {
         id: u64,
@@ -103,6 +104,7 @@ impl EngineLoader for RuntimeEngineLoader {
         cancellation: &CancellationToken,
         emit_model_state: &mut dyn FnMut(ModelState),
     ) -> Result<Box<dyn Engine>> {
+        asr::ensure_engine_supported(engine)?;
         let model_dir = self
             .models
             .ensure(engine, cancellation, emit_model_state)
@@ -435,20 +437,20 @@ fn worker_main(
                     }
                 }
 
-                let final_text = if job.enhance_requested && job.settings.enhance.provider != "off"
-                {
-                    info!("enhance requested (shift held)");
-                    match enhance::enhance(&text, &job.settings) {
-                        Ok(enhanced) if !enhanced.trim().is_empty() => enhanced,
-                        Ok(_) => text,
-                        Err(error) => {
-                            warn!(error = %error, "enhance failed; using raw transcript");
-                            text
+                let (final_text, enhancement_warning) =
+                    if job.enhance_requested && job.settings.enhance.mode.is_enabled() {
+                        info!("enhancement requested");
+                        match enhance::enhance(&text, &job.settings) {
+                            Ok(enhanced) if !enhanced.trim().is_empty() => (enhanced, None),
+                            Ok(_) => (text, None),
+                            Err(error) => {
+                                warn!(error = %error, "enhance failed; using raw transcript");
+                                (text, Some(error.to_string()))
+                            }
                         }
-                    }
-                } else {
-                    text
-                };
+                    } else {
+                        (text, None)
+                    };
 
                 let chars = final_text.chars().count();
                 let elapsed_ms = started.elapsed().as_millis() as u64;
@@ -459,6 +461,7 @@ fn worker_main(
                             id: job.id,
                             text: final_text,
                             auto_paste: job.settings.auto_paste,
+                            enhancement_warning,
                         }
                     });
                 if matches!(&event, WorkerEvent::JobCompleted { .. }) {
@@ -759,6 +762,34 @@ mod tests {
         assert_eq!(completed, vec![first, second]);
         assert_eq!(&*calls.lock(), &[1, 2]);
         assert_eq!(max_active.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn enhancement_failure_returns_the_raw_transcript_with_a_warning() {
+        let (mut worker, _, _, _) = worker(&[], None);
+        worker.load("ready".into()).unwrap();
+        wait_ready(&worker, "ready");
+        let mut settings = Settings::default();
+        settings.enhance.mode = crate::settings::EnhanceMode::Always;
+        settings.enhance.provider = "invalid-provider".into();
+        let job = worker.enqueue(vec![7.0], 16_000, true, settings).unwrap();
+
+        let events = wait_until(
+            &worker,
+            |event| matches!(event, WorkerEvent::JobCompleted { id, .. } if *id == job),
+        );
+        let completed = events.into_iter().find_map(|event| match event {
+            WorkerEvent::JobCompleted {
+                text,
+                enhancement_warning,
+                ..
+            } => Some((text, enhancement_warning)),
+            _ => None,
+        });
+
+        let (text, warning) = completed.unwrap();
+        assert_eq!(text, "7");
+        assert!(warning.unwrap().contains("unknown provider"));
     }
 
     #[test]

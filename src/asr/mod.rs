@@ -1,12 +1,13 @@
 //! ASR engine abstraction.
 //!
-//! For v0.2 native we ship Parakeet TDT 0.6B v3 (INT8 CPU) only. NPU + Whisper
-//! follow in subsequent commits. The engine signature is intentionally minimal:
-//! one async `transcribe(samples, sr) -> String` call.
+//! Ships Parakeet TDT 0.6B v3 on CPU or Snapdragon NPU and Whisper Large v3
+//! Turbo on Snapdragon NPU. The worker serializes calls through this minimal
+//! engine interface.
 
 use anyhow::Result;
 use std::path::PathBuf;
 
+mod hardware;
 mod ort_helpers;
 mod parakeet;
 mod qnn_ffi;
@@ -18,6 +19,7 @@ mod whisper_mel;
 mod whisper_npu;
 mod whisper_tokenizer;
 
+pub use hardware::{engine_support, ensure_engine_supported, EngineSupport};
 pub use parakeet::ParakeetEngine;
 
 pub trait Engine: Send {
@@ -30,10 +32,19 @@ pub fn verify_runtime_installation() -> Result<PathBuf> {
 }
 
 pub fn whisper_hardware_status() -> Result<String> {
-    whisper_npu::hardware_status()
+    Ok(match engine_support("whisper_npu")? {
+        EngineSupport::Supported { detail } => {
+            format!(
+                "supported: {}",
+                detail.unwrap_or_else(|| "Snapdragon X Elite".into())
+            )
+        }
+        EngineSupport::Unsupported { reason } => format!("unavailable: {reason}"),
+    })
 }
 
 pub fn load_from_dir(name: &str, model_dir: PathBuf) -> Result<Box<dyn Engine>> {
+    ensure_engine_supported(name)?;
     match name {
         "parakeet_cpu" => Ok(Box::new(ParakeetEngine::load_cpu_from(model_dir)?)),
         "parakeet_npu" => Ok(Box::new(ParakeetEngine::load_npu_from(model_dir)?)),

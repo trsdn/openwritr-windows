@@ -63,6 +63,7 @@ impl ParakeetEngine {
     }
 
     pub fn load_npu_from(dir: PathBuf) -> Result<Self> {
+        super::hardware::ensure_engine_supported("parakeet_npu")?;
         init_ort_once()?;
         Self::load_with_backend(&dir, Backend::Npu)
     }

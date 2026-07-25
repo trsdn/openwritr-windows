@@ -1,8 +1,8 @@
 [package]
 name = "openwritr"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
-description = "Native push-to-talk voice-to-text for Windows on ARM"
+description = "Native push-to-talk voice-to-text for Windows"
 license = "MIT"
 repository = "https://github.com/trsdn/openwritr-windows"
 rust-version = "1.85"

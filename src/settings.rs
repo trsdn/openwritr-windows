@@ -3,7 +3,7 @@ use crate::credentials::{
 };
 use crate::paths::settings_path;
 use crate::single_instance::SettingsTransaction;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::fs::{self, OpenOptions};
@@ -32,10 +32,27 @@ const VALID_TRIGGERS: &[&str] = &[
     "f19",
     "f20",
 ];
+const VALID_ENGINES: &[&str] = &["parakeet_cpu", "parakeet_npu", "whisper_npu"];
+const VALID_ENHANCE_PROVIDERS: &[&str] = &["github_copilot", "openai_compatible"];
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EnhanceMode {
+    #[default]
+    Never,
+    WithShift,
+    Always,
+}
+
+impl EnhanceMode {
+    pub fn is_enabled(self) -> bool {
+        !matches!(self, Self::Never)
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
 pub struct Enhance {
+    pub mode: EnhanceMode,
     pub provider: String,
     pub base_url: String,
     pub model: String,
@@ -44,10 +61,51 @@ pub struct Enhance {
 impl Default for Enhance {
     fn default() -> Self {
         Self {
-            provider: "off".into(),
+            mode: EnhanceMode::Never,
+            provider: "github_copilot".into(),
             base_url: "https://api.openai.com/v1".into(),
             model: "claude-haiku-4.5".into(),
         }
+    }
+}
+
+#[derive(Deserialize)]
+struct EnhanceDocument {
+    mode: Option<EnhanceMode>,
+    provider: Option<String>,
+    base_url: Option<String>,
+    model: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for Enhance {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let document = EnhanceDocument::deserialize(deserializer)?;
+        let defaults = Self::default();
+        let legacy_document = document.mode.is_none();
+        let legacy_provider = document.provider.as_deref();
+        let mode = match (document.mode, legacy_provider) {
+            (_, Some("off")) => EnhanceMode::Never,
+            (Some(mode), _) => mode,
+            (None, Some(_)) => EnhanceMode::WithShift,
+            (None, None) => defaults.mode,
+        };
+        let provider = match document.provider.as_deref() {
+            Some("off") | None => defaults.provider,
+            Some(_) => document.provider.expect("provider was checked"),
+        };
+        let model = match document.model {
+            Some(model) if !legacy_document || !model.trim().is_empty() => model,
+            _ => defaults.model,
+        };
+        Ok(Self {
+            mode,
+            provider,
+            base_url: document.base_url.unwrap_or(defaults.base_url),
+            model,
+        })
     }
 }
 
@@ -150,7 +208,7 @@ impl Settings {
         settings_revision(path)
     }
 
-    pub fn validate(&self) -> Result<(), SettingsError> {
+    fn validate_compatible_shortcut(&self) -> Result<(), SettingsError> {
         if self.hotkey_modifiers.is_empty() && self.hotkey_trigger == "none" {
             return Err(SettingsError::Validation(
                 "select at least one modifier or trigger key".into(),
@@ -177,6 +235,74 @@ impl Settings {
                 self.hotkey_trigger
             )));
         }
+        Ok(())
+    }
+
+    pub fn validate_shortcut(&self) -> Result<(), SettingsError> {
+        self.validate_compatible_shortcut()?;
+        if self.hotkey_trigger == "none" && self.hotkey_modifiers.len() < 2 {
+            return Err(SettingsError::Validation(
+                "a modifier-only shortcut requires at least two modifier keys".into(),
+            ));
+        }
+        if self.hotkey_trigger != "none"
+            && self.hotkey_modifiers.is_empty()
+            && !is_standalone_function_trigger(&self.hotkey_trigger)
+        {
+            return Err(SettingsError::Validation(
+                "a shortcut without modifiers may use only F13 through F20".into(),
+            ));
+        }
+        if self.enhance.mode == EnhanceMode::WithShift
+            && self
+                .hotkey_modifiers
+                .iter()
+                .any(|modifier| modifier == "shift")
+        {
+            return Err(SettingsError::Validation(
+                "Shift cannot be both part of the recording shortcut and the additional enhancement key"
+                    .into(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn validate_enhancement(&self) -> Result<(), SettingsError> {
+        if !VALID_ENHANCE_PROVIDERS.contains(&self.enhance.provider.as_str()) {
+            return Err(SettingsError::Validation(format!(
+                "unsupported enhancement provider `{}`",
+                self.enhance.provider
+            )));
+        }
+        if !self.enhance.mode.is_enabled() {
+            return Ok(());
+        }
+        if self.enhance.model.trim().is_empty() {
+            return Err(SettingsError::Validation(
+                "enhancement model ID must not be empty".into(),
+            ));
+        }
+        if self.enhance.provider == "openai_compatible" {
+            let url = reqwest::Url::parse(self.enhance.base_url.trim()).map_err(|error| {
+                SettingsError::Validation(format!("OpenAI-compatible base URL is invalid: {error}"))
+            })?;
+            if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+                return Err(SettingsError::Validation(
+                    "OpenAI-compatible base URL must be an HTTP(S) URL with a host".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_non_shortcut_fields(&self) -> Result<(), SettingsError> {
+        if !VALID_ENGINES.contains(&self.engine.as_str()) {
+            return Err(SettingsError::Validation(format!(
+                "unsupported transcription engine `{}`",
+                self.engine
+            )));
+        }
+        self.validate_enhancement()?;
         if !self.min_record_seconds.is_finite() || self.min_record_seconds < 0.0 {
             return Err(SettingsError::Validation(
                 "minimum recording duration must be a finite non-negative number".into(),
@@ -198,6 +324,16 @@ impl Settings {
         Ok(())
     }
 
+    fn validate_for_load(&self) -> Result<(), SettingsError> {
+        self.validate_compatible_shortcut()?;
+        self.validate_non_shortcut_fields()
+    }
+
+    pub fn validate(&self) -> Result<(), SettingsError> {
+        self.validate_shortcut()?;
+        self.validate_non_shortcut_fields()
+    }
+
     pub fn save_to(&self, path: &Path) -> Result<(), SettingsError> {
         self.validate()?;
         let document = serde_json::to_value(self)?;
@@ -208,6 +344,13 @@ impl Settings {
     pub fn save(&self) -> Result<(), SettingsError> {
         self.save_to(&settings_path())
     }
+}
+
+fn is_standalone_function_trigger(trigger: &str) -> bool {
+    matches!(
+        trigger,
+        "f13" | "f14" | "f15" | "f16" | "f17" | "f18" | "f19" | "f20"
+    )
 }
 
 fn load_with_migration(
@@ -423,7 +566,7 @@ fn settings_from_document(
         }
         None => Settings::default(),
     };
-    settings.validate()?;
+    settings.validate_for_load()?;
     Ok(settings)
 }
 
@@ -574,6 +717,105 @@ mod tests {
         let mut value = serde_json::to_value(Settings::default()).unwrap();
         value["enhance"]["api_key"] = Value::String(key.into());
         value
+    }
+
+    #[test]
+    fn migrates_legacy_enhancement_provider_semantics() {
+        let mut off = serde_json::to_value(Settings::default()).unwrap();
+        off["enhance"].as_object_mut().unwrap().remove("mode");
+        off["enhance"]["provider"] = Value::String("off".into());
+        let off: Settings = serde_json::from_value(off).unwrap();
+        assert_eq!(off.enhance.mode, EnhanceMode::Never);
+        assert_eq!(off.enhance.provider, "github_copilot");
+
+        let mut enabled = serde_json::to_value(Settings::default()).unwrap();
+        enabled["enhance"].as_object_mut().unwrap().remove("mode");
+        enabled["enhance"]["provider"] = Value::String("openai_compatible".into());
+        enabled["enhance"]["model"] = Value::String(String::new());
+        let enabled: Settings = serde_json::from_value(enabled).unwrap();
+        assert_eq!(enabled.enhance.mode, EnhanceMode::WithShift);
+        assert_eq!(enabled.enhance.provider, "openai_compatible");
+        assert_eq!(enabled.enhance.model, "claude-haiku-4.5");
+    }
+
+    #[test]
+    fn enhancement_mode_round_trips() {
+        let mut settings = Settings::default();
+        settings.enhance.mode = EnhanceMode::Always;
+
+        let reloaded: Settings =
+            serde_json::from_value(serde_json::to_value(&settings).unwrap()).unwrap();
+
+        assert_eq!(reloaded.enhance.mode, EnhanceMode::Always);
+    }
+
+    #[test]
+    fn validates_safe_shortcut_classes() {
+        let mut settings = Settings::default();
+        assert!(settings.validate_shortcut().is_ok());
+
+        settings.hotkey_modifiers = vec!["ctrl".into()];
+        assert!(settings.validate_shortcut().is_err());
+
+        settings.hotkey_modifiers.clear();
+        settings.hotkey_trigger = "space".into();
+        assert!(settings.validate_shortcut().is_err());
+
+        settings.hotkey_trigger = "f13".into();
+        assert!(settings.validate_shortcut().is_ok());
+    }
+
+    #[test]
+    fn loads_legacy_shortcuts_but_requires_a_safe_replacement_before_saving() {
+        let mut single_modifier = Settings::default();
+        single_modifier.hotkey_modifiers = vec!["ctrl".into()];
+
+        let mut bare_trigger = Settings::default();
+        bare_trigger.hotkey_modifiers.clear();
+        bare_trigger.hotkey_trigger = "space".into();
+
+        let mut shift_conflict = Settings::default();
+        shift_conflict.hotkey_modifiers = vec!["ctrl".into(), "shift".into()];
+        shift_conflict.enhance.mode = EnhanceMode::WithShift;
+
+        let temp = tempfile::tempdir().unwrap();
+        for (index, settings) in [single_modifier, bare_trigger, shift_conflict]
+            .into_iter()
+            .enumerate()
+        {
+            let path = temp.path().join(format!("settings-{index}.json"));
+            fs::write(&path, serde_json::to_vec_pretty(&settings).unwrap()).unwrap();
+
+            let loaded = Settings::load_from(&path).unwrap();
+
+            assert_eq!(loaded.hotkey_modifiers, settings.hotkey_modifiers);
+            assert_eq!(loaded.hotkey_trigger, settings.hotkey_trigger);
+            assert_eq!(loaded.enhance.mode, settings.enhance.mode);
+            assert!(loaded.validate().is_err());
+        }
+    }
+
+    #[test]
+    fn rejects_shift_enhancement_conflicts() {
+        let mut settings = Settings::default();
+        settings.hotkey_modifiers = vec!["ctrl".into(), "shift".into()];
+        settings.enhance.mode = EnhanceMode::WithShift;
+        assert!(settings.validate_shortcut().is_err());
+
+        settings.enhance.mode = EnhanceMode::Always;
+        assert!(settings.validate_shortcut().is_ok());
+    }
+
+    #[test]
+    fn validates_openai_compatible_endpoint() {
+        let mut settings = Settings::default();
+        settings.enhance.mode = EnhanceMode::Always;
+        settings.enhance.provider = "openai_compatible".into();
+        settings.enhance.base_url = "ftp://example.com".into();
+        assert!(settings.validate_enhancement().is_err());
+
+        settings.enhance.base_url = "http://localhost:11434/v1".into();
+        assert!(settings.validate_enhancement().is_ok());
     }
 
     #[test]

@@ -3,11 +3,13 @@
 //! Blocking reqwest call so we can run it inline on the transcribe thread.
 
 use crate::credentials::read_openai_api_key;
-use crate::settings::Settings;
+use crate::settings::{EnhanceMode, Settings};
 use anyhow::{anyhow, Result};
 use parking_lot::Mutex;
 use serde_json::json;
+use std::io;
 use std::time::{Duration, Instant};
+use thiserror::Error;
 use tracing::warn;
 
 const SYSTEM: &str = "You are a transcription cleanup assistant. Fix \
@@ -16,14 +18,41 @@ recognition errors in the user message. Preserve the original meaning, \
 language, and tone. Return ONLY the cleaned text — no preamble, no \
 quotes, no commentary.";
 
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
+pub enum CopilotAuthError {
+    #[error("GitHub CLI is not installed or is not available on PATH")]
+    CliMissing,
+    #[error("GitHub CLI is not authenticated; run `gh auth login`")]
+    NotAuthenticated,
+    #[error("GitHub CLI token lookup failed: {0}")]
+    CommandFailed(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CopilotReadiness {
+    Ready,
+    CliMissing,
+    NotAuthenticated,
+    Failed(String),
+}
+
+pub fn github_copilot_readiness() -> CopilotReadiness {
+    match gh_token() {
+        Ok(_) => CopilotReadiness::Ready,
+        Err(CopilotAuthError::CliMissing) => CopilotReadiness::CliMissing,
+        Err(CopilotAuthError::NotAuthenticated) => CopilotReadiness::NotAuthenticated,
+        Err(error) => CopilotReadiness::Failed(error.to_string()),
+    }
+}
+
 pub fn enhance(text: &str, settings: &Settings) -> Result<String> {
     let cfg = &settings.enhance;
-    if cfg.provider == "off" || text.trim().is_empty() {
+    if cfg.mode == EnhanceMode::Never || text.trim().is_empty() {
         return Ok(text.to_string());
     }
     let (url, token) = match cfg.provider.as_str() {
         "github_copilot" => {
-            let token = gh_token().ok_or_else(|| anyhow!("`gh auth token` empty"))?;
+            let token = gh_token()?;
             (
                 "https://api.githubcopilot.com/chat/completions".to_string(),
                 token,
@@ -57,9 +86,10 @@ pub fn enhance(text: &str, settings: &Settings) -> Result<String> {
         .build()?;
     let mut req = client.post(&url).bearer_auth(&token).json(&body);
     if cfg.provider == "github_copilot" {
-        req = req
-            .header("Copilot-Integration-Id", "vscode-chat")
-            .header("Editor-Version", "OpenWritr/0.2");
+        req = req.header("Copilot-Integration-Id", "vscode-chat").header(
+            "Editor-Version",
+            concat!("OpenWritr/", env!("CARGO_PKG_VERSION")),
+        );
     }
     let resp = req.send()?;
     if !resp.status().is_success() {
@@ -76,14 +106,14 @@ pub fn enhance(text: &str, settings: &Settings) -> Result<String> {
     Ok(content.trim().to_string())
 }
 
-fn gh_token() -> Option<String> {
+fn gh_token() -> std::result::Result<String, CopilotAuthError> {
     // Cache the token for 10 minutes so we don't spawn `gh` on every call.
     static CACHE: Mutex<Option<(String, Instant)>> = Mutex::new(None);
     {
         let g = CACHE.lock();
         if let Some((tok, t)) = g.as_ref() {
             if t.elapsed() < Duration::from_secs(600) {
-                return Some(tok.clone());
+                return Ok(tok.clone());
             }
         }
     }
@@ -93,18 +123,51 @@ fn gh_token() -> Option<String> {
         .args(["auth", "token"])
         .creation_flags(CREATE_NO_WINDOW)
         .output()
-        .ok()?;
+        .map_err(|error| match error.kind() {
+            io::ErrorKind::NotFound => CopilotAuthError::CliMissing,
+            _ => CopilotAuthError::CommandFailed(error.to_string()),
+        })?;
     if !out.status.success() {
-        warn!(
-            "`gh auth token` failed: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        return None;
+        warn!(status = ?out.status.code(), "`gh auth token` failed");
+        return parse_gh_token_output(false, &out.stdout);
     }
-    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if s.is_empty() {
-        return None;
-    }
+    let s = parse_gh_token_output(true, &out.stdout)?;
     *CACHE.lock() = Some((s.clone(), Instant::now()));
-    Some(s)
+    Ok(s)
+}
+
+fn parse_gh_token_output(
+    success: bool,
+    stdout: &[u8],
+) -> std::result::Result<String, CopilotAuthError> {
+    if !success {
+        return Err(CopilotAuthError::NotAuthenticated);
+    }
+    let token = String::from_utf8_lossy(stdout).trim().to_string();
+    if token.is_empty() {
+        Err(CopilotAuthError::NotAuthenticated)
+    } else {
+        Ok(token)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_gh_token_output, CopilotAuthError};
+
+    #[test]
+    fn classifies_github_cli_token_results_without_exposing_tokens() {
+        assert_eq!(
+            parse_gh_token_output(false, b"").unwrap_err(),
+            CopilotAuthError::NotAuthenticated
+        );
+        assert_eq!(
+            parse_gh_token_output(true, b" \r\n").unwrap_err(),
+            CopilotAuthError::NotAuthenticated
+        );
+        assert_eq!(
+            parse_gh_token_output(true, b"secret-token\r\n").unwrap(),
+            "secret-token"
+        );
+    }
 }
