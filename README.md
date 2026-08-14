@@ -106,6 +106,11 @@ Tray icon → right-click → **Settings**. All fields:
   Windows Credential Manager, not in the settings file. If cleanup fails, the
   raw transcript is still delivered and OpenWritr shows a warning.
 - **Advanced**: set the maximum recording duration.
+- **About, credits & support** (also available directly from the tray menu):
+  view the installed version and architecture,
+  official website, Microsoft Store, source, releases, issue reporting,
+  privacy and license links, model/runtime credits, local third-party notices,
+  and guidance for exporting privacy-safe diagnostics.
 
 Settings are stored at `%LOCALAPPDATA%\OpenWritr\settings.json`. The app polls
 the file's mtime so external edits also take effect live. Writes use an atomic

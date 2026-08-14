@@ -8,6 +8,7 @@ pub struct Tray {
     pub _icon: TrayIcon,
     pub menu_quit_id: MenuId,
     pub menu_settings_id: MenuId,
+    pub menu_about_id: MenuId,
     pub menu_open_logs_id: MenuId,
     pub menu_export_diagnostics_id: MenuId,
     pub menu_cancel_model_id: MenuId,
@@ -32,6 +33,7 @@ impl Tray {
         let open_logs = MenuItem::new("Open logs", true, None);
         let export_diagnostics = MenuItem::new("Export diagnostics…", true, None);
         let settings = MenuItem::new("Settings…", true, None);
+        let about = MenuItem::new("About, credits & support…", true, None);
         let sep = PredefinedMenuItem::separator();
         let sep2 = PredefinedMenuItem::separator();
         let quit = MenuItem::new("Quit", true, None);
@@ -43,6 +45,7 @@ impl Tray {
         menu.append(&open_logs)?;
         menu.append(&export_diagnostics)?;
         menu.append(&settings)?;
+        menu.append(&about)?;
         menu.append(&sep2)?;
         menu.append(&quit)?;
 
@@ -57,6 +60,7 @@ impl Tray {
             _icon: tray,
             menu_quit_id: quit.id().clone(),
             menu_settings_id: settings.id().clone(),
+            menu_about_id: about.id().clone(),
             menu_open_logs_id: open_logs.id().clone(),
             menu_export_diagnostics_id: export_diagnostics.id().clone(),
             menu_cancel_model_id: cancel_model.id().clone(),

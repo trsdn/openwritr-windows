@@ -27,7 +27,8 @@
         { "source_root": "runtime", "source": "third-party-licenses/onnxruntime-qnn-Privacy.md", "target": "third-party-licenses/onnxruntime-qnn-Privacy.md", "kind": "file" },
         { "source_root": "runtime", "source": "third-party-licenses/Qualcomm_LICENSE.pdf", "target": "third-party-licenses/Qualcomm_LICENSE.pdf", "kind": "file" },
         { "source_root": "repository", "source": "README.md", "target": "README.md", "kind": "file" },
-        { "source_root": "repository", "source": "LICENSE", "target": "LICENSE", "kind": "file" }
+        { "source_root": "repository", "source": "LICENSE", "target": "LICENSE", "kind": "file" },
+        { "source_root": "repository", "source": "PRIVACY.md", "target": "PRIVACY.md", "kind": "file" }
       ],
       "optional_files": [],
       "forbidden_files": []
@@ -46,7 +47,8 @@
         { "source_root": "runtime", "source": "third-party-licenses/onnxruntime-ThirdPartyNotices.txt", "target": "third-party-licenses/onnxruntime-ThirdPartyNotices.txt", "kind": "file" },
         { "source_root": "runtime", "source": "third-party-licenses/onnxruntime-Privacy.md", "target": "third-party-licenses/onnxruntime-Privacy.md", "kind": "file" },
         { "source_root": "repository", "source": "README.md", "target": "README.md", "kind": "file" },
-        { "source_root": "repository", "source": "LICENSE", "target": "LICENSE", "kind": "file" }
+        { "source_root": "repository", "source": "LICENSE", "target": "LICENSE", "kind": "file" },
+        { "source_root": "repository", "source": "PRIVACY.md", "target": "PRIVACY.md", "kind": "file" }
       ],
       "optional_files": [],
       "forbidden_files": [

@@ -13,7 +13,10 @@ fn main() {
         res.set("ProductName", "OpenWritr");
         res.set("FileDescription", "OpenWritr — push-to-talk voice-to-text");
         res.set("CompanyName", "Torsten Mahr");
-        res.set("LegalCopyright", "MIT License");
+        res.set(
+            "LegalCopyright",
+            "Copyright (c) 2026 Torsten Mahr and contributors",
+        );
         if let Err(e) = res.compile() {
             // Don't hard-fail the build if the resource compiler isn't on PATH
             // (e.g. a shell without vcvars). Just warn — the exe builds, sans icon.

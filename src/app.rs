@@ -508,6 +508,21 @@ impl AppHandler {
                             .spawn();
                     });
                 }
+                continue;
+            }
+            if ev.id == self.state.tray.menu_about_id {
+                info!("opening About UI subprocess");
+                if let Ok(exe) = std::env::current_exe() {
+                    thread::spawn(move || {
+                        let _ = std::process::Command::new(exe)
+                            .arg("--about")
+                            .stdin(Stdio::null())
+                            .stdout(Stdio::null())
+                            .stderr(Stdio::null())
+                            .creation_flags(DETACHED_PROCESS | CREATE_NO_WINDOW)
+                            .spawn();
+                    });
+                }
             }
         }
 

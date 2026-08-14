@@ -2,6 +2,7 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod about;
 mod app;
 mod asr;
 mod audio;
@@ -33,9 +34,10 @@ fn main() -> Result<()> {
         return self_check::run();
     }
     let settings_mode = is_settings_mode(arguments.iter());
+    let about_mode = is_about_mode(arguments.iter());
 
-    // If invoked with `--settings`, render the egui settings dialog and exit.
-    if settings_mode {
+    // Settings and About share one subprocess and single-instance boundary.
+    if settings_mode || about_mode {
         let settings_instance = single_instance::SingleInstance::acquire_settings()?;
         let _log_guard = init_tracing()?;
         info!(
@@ -49,7 +51,7 @@ fn main() -> Result<()> {
             info!("settings window already running; exiting");
             return Ok(());
         };
-        let result = settings_ui::run_dialog();
+        let result = settings_ui::run_dialog(about_mode);
         info!("settings process stopping");
         return result;
     }
@@ -84,6 +86,11 @@ fn main() -> Result<()> {
 fn is_settings_mode<T: AsRef<OsStr>>(args: impl IntoIterator<Item = T>) -> bool {
     args.into_iter()
         .any(|arg| arg.as_ref().eq_ignore_ascii_case(OsStr::new("--settings")))
+}
+
+fn is_about_mode<T: AsRef<OsStr>>(args: impl IntoIterator<Item = T>) -> bool {
+    args.into_iter()
+        .any(|arg| arg.as_ref().eq_ignore_ascii_case(OsStr::new("--about")))
 }
 
 fn is_self_check_mode<T: AsRef<OsStr>>(args: impl IntoIterator<Item = T>) -> bool {
@@ -131,7 +138,7 @@ fn init_tracing() -> Result<tracing_appender::non_blocking::WorkerGuard> {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_self_check_mode, is_settings_mode};
+    use super::{is_about_mode, is_self_check_mode, is_settings_mode};
     use std::ffi::OsString;
 
     #[test]
@@ -146,5 +153,12 @@ mod tests {
         assert!(is_self_check_mode([OsString::from("--self-check")]));
         assert!(is_self_check_mode([OsString::from("--SELF-CHECK")]));
         assert!(!is_self_check_mode([OsString::from("--settings")]));
+    }
+
+    #[test]
+    fn about_mode_is_selected_before_tray_startup() {
+        assert!(is_about_mode([OsString::from("--about")]));
+        assert!(is_about_mode([OsString::from("--ABOUT")]));
+        assert!(!is_about_mode([OsString::from("--settings")]));
     }
 }

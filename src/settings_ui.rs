@@ -1,6 +1,8 @@
 //! egui settings dialog launched as a subprocess.
 
+use crate::about;
 use crate::credentials::{store_verified, CredentialStore, WindowsCredentialStore};
+use crate::diagnostics;
 use crate::enhance::{self, CopilotReadiness};
 use crate::model_manager::{ModelCacheState, ModelInfo, ModelManager};
 use crate::paths::settings_path;
@@ -11,7 +13,7 @@ use eframe::egui;
 use std::collections::HashMap;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 
-pub fn run_dialog() -> Result<()> {
+pub fn run_dialog(show_about: bool) -> Result<()> {
     let (settings, initial_error, migration_blocked, load_failed, settings_revision) =
         match Settings::load_runtime() {
             Ok(loaded) => {
@@ -74,6 +76,8 @@ pub fn run_dialog() -> Result<()> {
                 copilot_readiness: None,
                 copilot_rx: Some(copilot_rx),
                 confirm_discard: false,
+                show_about,
+                about_error: None,
             }))
         }),
     )
@@ -123,6 +127,8 @@ struct SettingsApp {
     copilot_readiness: Option<CopilotReadiness>,
     copilot_rx: Option<Receiver<CopilotReadiness>>,
     confirm_discard: bool,
+    show_about: bool,
+    about_error: Option<String>,
 }
 
 impl SettingsApp {
@@ -990,6 +996,127 @@ impl SettingsApp {
             .color(secondary_text()),
         );
     }
+
+    fn render_about(&mut self, ui: &mut egui::Ui) {
+        ui.heading("About OpenWritr");
+        ui.label("Local push-to-talk voice-to-text for Windows.");
+        ui.add_space(4.0);
+        ui.label(
+            egui::RichText::new(format!(
+                "Version {} · {} · Publisher: {}",
+                env!("CARGO_PKG_VERSION"),
+                architecture_label(),
+                about::PUBLISHER
+            ))
+            .small()
+            .color(secondary_text()),
+        );
+        ui.label(
+            egui::RichText::new(about::COPYRIGHT)
+                .small()
+                .color(secondary_text()),
+        );
+
+        ui.add_space(10.0);
+        ui.separator();
+        ui.add_space(8.0);
+        ui.label(egui::RichText::new("Project and support").strong());
+        ui.label(
+            egui::RichText::new(
+                "Official project links open in your default browser. To report a problem, export diagnostics from the tray menu and attach the resulting privacy-safe bundle.",
+            )
+            .small()
+            .color(secondary_text()),
+        );
+        ui.add_space(4.0);
+
+        let mut selected_link = None;
+        ui.horizontal_wrapped(|ui| {
+            for link in about::OFFICIAL_LINKS {
+                if ui.link(link.label).clicked() {
+                    selected_link = Some((link.label, link.url));
+                }
+            }
+        });
+        if let Some((label, url)) = selected_link {
+            self.set_about_result(label, about::open_url(url));
+        }
+
+        ui.add_space(6.0);
+        if ui.small_button("Open logs").clicked() {
+            self.set_about_result("Open logs", diagnostics::open_logs_dir());
+        }
+        ui.label(
+            egui::RichText::new(
+                "Tray menu → Export diagnostics creates a bounded bundle without audio, transcript text, clipboard contents, or API keys.",
+            )
+            .small()
+            .color(secondary_text()),
+        );
+
+        ui.add_space(10.0);
+        ui.separator();
+        ui.add_space(8.0);
+        ui.label(egui::RichText::new("Legal").strong());
+        ui.label(about::LICENSE_SUMMARY);
+        ui.horizontal_wrapped(|ui| {
+            if ui.small_button("Open MIT License").clicked() {
+                self.set_about_result("Open MIT License", about::open_license());
+            }
+            if ui.small_button("Open privacy policy").clicked() {
+                self.set_about_result("Open privacy policy", about::open_privacy_policy());
+            }
+            if ui.small_button("Open third-party licenses").clicked() {
+                self.set_about_result(
+                    "Open third-party licenses",
+                    about::open_third_party_licenses(),
+                );
+            }
+            if ui.link("MIT License online").clicked() {
+                self.set_about_result("MIT License online", about::open_url(about::LICENSE_URL));
+            }
+        });
+
+        ui.add_space(10.0);
+        ui.separator();
+        ui.add_space(8.0);
+        ui.label(egui::RichText::new("Models, runtimes, and credits").strong());
+        let mut selected_credit = None;
+        for credit in about::CREDITS {
+            ui.horizontal_wrapped(|ui| {
+                if ui.link(credit.name).clicked() {
+                    selected_credit = Some((credit.name, credit.url));
+                }
+                ui.label(
+                    egui::RichText::new(credit.attribution)
+                        .small()
+                        .color(secondary_text()),
+                );
+            });
+        }
+        if let Some((label, url)) = selected_credit {
+            self.set_about_result(label, about::open_url(url));
+        }
+
+        ui.add_space(10.0);
+        ui.label(
+            egui::RichText::new(about::DISCLAIMER)
+                .small()
+                .italics()
+                .color(secondary_text()),
+        );
+
+        if let Some(error) = &self.about_error {
+            ui.add_space(8.0);
+            inline_error(ui, error);
+        }
+    }
+
+    fn set_about_result(&mut self, action: &str, result: Result<()>) {
+        self.about_error = result
+            .err()
+            .map(|error| format!("{action} failed: {error}"));
+    }
 }
 
 impl eframe::App for SettingsApp {
@@ -1029,10 +1156,10 @@ impl eframe::App for SettingsApp {
                 ui.add_space(4.0);
             }
             ui.horizontal(|ui| {
-                ui.hyperlink_to(
-                    egui::RichText::new("OpenWritr on GitHub").size(12.0),
-                    "https://github.com/trsdn/openwritr-windows",
-                );
+                if ui.small_button("About, credits & support").clicked() {
+                    self.about_error = None;
+                    self.show_about = true;
+                }
                 ui.label(
                     egui::RichText::new(format!(
                         "v{} - {}",
@@ -1128,6 +1255,25 @@ impl eframe::App for SettingsApp {
             match self.persist() {
                 Ok(()) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
                 Err(error) => self.error = Some(error.to_string()),
+            }
+        }
+
+        if self.show_about {
+            let mut close_about = false;
+            egui::Modal::new(egui::Id::new("about_openwritr")).show(ctx, |ui| {
+                ui.set_min_width(520.0);
+                egui::ScrollArea::vertical()
+                    .max_height(560.0)
+                    .show(ui, |ui| self.render_about(ui));
+                ui.add_space(8.0);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("Close").clicked() {
+                        close_about = true;
+                    }
+                });
+            });
+            if close_about {
+                self.show_about = false;
             }
         }
 
