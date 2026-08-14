@@ -147,3 +147,28 @@ jobs:
             target/dist/openwritr-windows-*.zip
             target/dist/openwritr-windows-*-setup.exe
             target/dist/SHA256SUMS.txt
+
+      - name: Install Microsoft Store CLI
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: microsoft/microsoft-store-apppublisher@v1.1
+
+      - name: Publish update to Microsoft Store
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          AZURE_AD_TENANT_ID: ${{ secrets.AZURE_AD_TENANT_ID }}
+          AZURE_AD_APPLICATION_CLIENT_ID: ${{ secrets.AZURE_AD_APPLICATION_CLIENT_ID }}
+          AZURE_AD_APPLICATION_SECRET: ${{ secrets.AZURE_AD_APPLICATION_SECRET }}
+          SELLER_ID: ${{ secrets.SELLER_ID }}
+          STORE_PRODUCT_ID: ${{ vars.STORE_PRODUCT_ID }}
+        run: |
+          msstore reconfigure `
+            --tenantId $env:AZURE_AD_TENANT_ID `
+            --sellerId $env:SELLER_ID `
+            --clientId $env:AZURE_AD_APPLICATION_CLIENT_ID `
+            --clientSecret $env:AZURE_AD_APPLICATION_SECRET
+
+          $metadata = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
+          $version = "$($metadata.packages[0].version).0"
+          $bundle = Join-Path $PWD "target\dist\openwritr-$version.msixbundle"
+          msstore publish $bundle --appId $env:STORE_PRODUCT_ID

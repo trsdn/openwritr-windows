@@ -13,7 +13,7 @@ use super::tdt::Tdt;
 use super::{resample, tokenizer::Vocab};
 use crate::asr::Engine;
 use anyhow::{anyhow, Context, Result};
-use ndarray::{Array1, Array2, Array3, Axis, Ix3};
+use ndarray::{Array1, Array3, Ix3};
 use ort::session::{
     builder::{AutoDevicePolicy, GraphOptimizationLevel},
     Session,
@@ -149,10 +149,19 @@ impl ParakeetEngine {
     /// the compiled window (= MAX_NPU_SECONDS); caller pads. CPU is dynamic
     /// shape, any length works. Returns encoder_out [1, 1024, T] and valid
     /// T_out (after clipping to the encoder's reported `encoded_length`).
-    fn preprocess_and_encode(&mut self, pcm: &[f32]) -> Result<(Array3<f32>, usize)> {
+    fn preprocess_and_encode(
+        &mut self,
+        pcm: &[f32],
+        valid_samples: usize,
+    ) -> Result<(Array3<f32>, usize)> {
         let n = pcm.len();
+        if valid_samples > n {
+            return Err(anyhow!(
+                "valid sample count {valid_samples} exceeds buffer length {n}"
+            ));
+        }
         let wave = ndarray::Array2::from_shape_vec((1, n), pcm.to_vec())?;
-        let wave_len = Array1::<i64>::from_elem(1, n as i64);
+        let wave_len = Array1::<i64>::from_elem(1, valid_samples as i64);
         let pre_in = ort::inputs![
             "waveforms" => Value::from_array(wave)?,
             "waveforms_lens" => Value::from_array(wave_len)?,
@@ -174,6 +183,13 @@ impl ParakeetEngine {
                 .to_owned();
             (features, features_lens)
         };
+        let feature_frames = features.dim().2;
+        let valid_feature_frames = features_lens
+            .iter()
+            .next()
+            .copied()
+            .unwrap_or(feature_frames as i64)
+            .max(0) as usize;
 
         let (encoder_out, encoder_lens) = match &mut self.encoder {
             Encoder::Cpu(encoder) => {
@@ -244,7 +260,12 @@ impl ParakeetEngine {
             .copied()
             .map(|v| v as usize)
             .unwrap_or(encoder_out.dim().2)
-            .min(encoder_out.dim().2);
+            .min(encoder_out.dim().2)
+            .min(scale_valid_frames(
+                valid_feature_frames,
+                feature_frames,
+                encoder_out.dim().2,
+            ));
         Ok((encoder_out, valid_t))
     }
 
@@ -264,16 +285,15 @@ impl ParakeetEngine {
         // NPU window the binary was compiled for (samples + mel-frame stride).
         let chunk_samples = (MAX_NPU_SECONDS * 16_000.0) as usize;
         // 1 s of overlap between successive NPU chunks, in audio samples and
-        // in encoder-output frames (encoder downsamples by ~8 → 12 frames/s).
+        // enough repeated speech for text-level overlap removal.
         let stride_samples = ((MAX_NPU_SECONDS - 1.0) * 16_000.0) as usize;
-        const OVERLAP_FRAMES: usize = 12;
 
         let is_npu = matches!(&self.encoder, Encoder::Npu(_));
         let n_real = pcm_16k.len();
 
         // CPU mode: encoder is dynamic-shape, no padding or chunking.
         if !is_npu {
-            let (encoder_out, valid_t) = self.preprocess_and_encode(pcm_16k)?;
+            let (encoder_out, valid_t) = self.preprocess_and_encode(pcm_16k, pcm_16k.len())?;
             return self.decode_features(encoder_out, valid_t);
         }
 
@@ -282,39 +302,26 @@ impl ParakeetEngine {
         if n_real <= chunk_samples {
             let mut padded = pcm_16k.to_vec();
             padded.resize(chunk_samples, 0.0);
-            let (encoder_out, valid_t) = self.preprocess_and_encode(&padded)?;
+            let (encoder_out, valid_t) = self.preprocess_and_encode(&padded, n_real)?;
             return self.decode_features(encoder_out, valid_t);
         }
 
-        // NPU mode, audio longer than the window: slide 8-s windows with 1 s
-        // overlap, stitch the encoder feature streams at the seam (drop the
-        // overlapping 12 leading frames of each non-first chunk), then run
-        // the TDT decoder once over the concatenated features.
-        let mut stitched: Vec<Array2<f32>> = Vec::new();
+        // NPU mode, audio longer than the window: decode every overlapping
+        // window with fresh TDT state, then remove duplicated overlap text.
+        // A single decoder pass over a long stitched feature stream can stop
+        // emitting after a seam and silently lose an entire middle or final
+        // section even though every encoder chunk completed successfully.
+        let mut chunk_transcripts = Vec::new();
         let mut chunk_start = 0usize;
         let mut chunk_idx = 0usize;
         loop {
             let chunk_end_real = (chunk_start + chunk_samples).min(n_real);
             let mut chunk_pcm = pcm_16k[chunk_start..chunk_end_real].to_vec();
+            let valid_samples = chunk_pcm.len();
             chunk_pcm.resize(chunk_samples, 0.0);
 
-            let (encoder_out, valid_t) = self.preprocess_and_encode(&chunk_pcm)?;
-            // [1, 1024, T] → [T, 1024]
-            let permuted = encoder_out
-                .permuted_axes([0, 2, 1])
-                .as_standard_layout()
-                .to_owned();
-            let chunk_frames: Array2<f32> = permuted.slice(ndarray::s![0, .., ..]).to_owned();
-
-            let start_t = if chunk_idx == 0 { 0 } else { OVERLAP_FRAMES };
-            let end_t = valid_t;
-            if start_t < end_t {
-                stitched.push(
-                    chunk_frames
-                        .slice(ndarray::s![start_t..end_t, ..])
-                        .to_owned(),
-                );
-            }
+            let (encoder_out, valid_t) = self.preprocess_and_encode(&chunk_pcm, valid_samples)?;
+            chunk_transcripts.push(self.decode_features(encoder_out, valid_t)?);
 
             if chunk_end_real == n_real {
                 break;
@@ -322,21 +329,75 @@ impl ParakeetEngine {
             chunk_start += stride_samples;
             chunk_idx += 1;
         }
-        info!(chunks = chunk_idx + 1, "NPU chunked encode");
+        info!(chunks = chunk_idx + 1, "NPU chunked decode");
 
-        if stitched.is_empty() {
-            return Ok(String::new());
-        }
-        let views: Vec<_> = stitched.iter().map(|a| a.view()).collect();
-        let final_2d = ndarray::concatenate(Axis(0), &views)
-            .map_err(|e| anyhow!("concat encoder features: {e}"))?;
-        let final_features: Array3<f32> = final_2d.insert_axis(Axis(0));
-        let t_out = final_features.dim().1;
-        let token_ids = self
-            .tdt
-            .decode(&mut self.decoder_joint, &final_features, t_out)?;
-        Ok(self.vocab.detokenize(&token_ids))
+        Ok(chunk_transcripts
+            .into_iter()
+            .fold(String::new(), |transcript, chunk| {
+                merge_overlapping_chunks(&transcript, &chunk)
+            }))
     }
+}
+
+fn merge_overlapping_chunks(transcript: &str, next_chunk: &str) -> String {
+    let transcript = transcript.trim();
+    let next_chunk = next_chunk.trim();
+    if transcript.is_empty() {
+        return next_chunk.to_string();
+    }
+    if next_chunk.is_empty() {
+        return transcript.to_string();
+    }
+
+    let transcript_words: Vec<_> = transcript.split_whitespace().collect();
+    let next_words: Vec<_> = next_chunk.split_whitespace().collect();
+    let transcript_normalized: Vec<_> = transcript_words
+        .iter()
+        .map(|word| normalize_merge_word(word))
+        .collect();
+    let next_normalized: Vec<_> = next_words
+        .iter()
+        .map(|word| normalize_merge_word(word))
+        .collect();
+    let max_overlap = transcript_words.len().min(next_words.len());
+
+    for overlap in (1..=max_overlap).rev() {
+        // The end of a fixed NPU window can hallucinate a few words because
+        // it has no right context. If the next overlapping window repeats a
+        // reliable word anchor, prefer that fresh decoding and discard the
+        // short stale suffix instead of emitting both versions.
+        for trailing_words in 0..=6.min(transcript_words.len() - overlap) {
+            let transcript_end = transcript_words.len() - trailing_words;
+            let transcript_start = transcript_end - overlap;
+            let left = &transcript_normalized[transcript_start..transcript_end];
+            let right = &next_normalized[..overlap];
+            if left.iter().all(|word| !word.is_empty()) && left == right {
+                let mut merged = transcript_words[..transcript_end].join(" ");
+                if overlap < next_words.len() {
+                    merged.push(' ');
+                    merged.push_str(&next_words[overlap..].join(" "));
+                }
+                return merged;
+            }
+        }
+    }
+
+    format!("{transcript} {next_chunk}")
+}
+
+fn normalize_merge_word(word: &str) -> String {
+    word.chars()
+        .filter(|character| character.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn scale_valid_frames(valid_input: usize, total_input: usize, total_output: usize) -> usize {
+    if total_input == 0 || valid_input == 0 || total_output == 0 {
+        return 0;
+    }
+    let numerator = total_output.saturating_mul(valid_input.min(total_input));
+    numerator.div_ceil(total_input).min(total_output)
 }
 
 fn build_cpu_session(path: &Path) -> Result<Session> {
@@ -356,6 +417,68 @@ fn build_cpu_session(path: &Path) -> Result<Session> {
         .commit_from_file(path)
         .ortx()
         .with_context(|| format!("load {}", path.display()))
+}
+
+#[cfg(test)]
+mod tail_merge_tests {
+    use super::{merge_overlapping_chunks, scale_valid_frames};
+
+    #[test]
+    fn removes_the_repeated_chunk_overlap() {
+        assert_eq!(
+            merge_overlapping_chunks(
+                "Das ist ein langer Satz und hier beginnt das Ende",
+                "hier beginnt das Ende das vorher komplett gefehlt hat."
+            ),
+            "Das ist ein langer Satz und hier beginnt das Ende das vorher komplett gefehlt hat."
+        );
+    }
+
+    #[test]
+    fn leaves_a_complete_transcript_unchanged() {
+        assert_eq!(
+            merge_overlapping_chunks("Der vollständige Satz endet genau hier.", "hier."),
+            "Der vollständige Satz endet genau hier."
+        );
+    }
+
+    #[test]
+    fn preserves_both_chunks_when_the_overlap_is_transcribed_differently() {
+        assert_eq!(
+            merge_overlapping_chunks("Bereits erkannter Text", "Unabhängiger anderer Text"),
+            "Bereits erkannter Text Unabhängiger anderer Text"
+        );
+    }
+
+    #[test]
+    fn drops_a_short_hallucinated_suffix_after_the_real_overlap() {
+        assert_eq!(
+            merge_overlapping_chunks(
+                "Der Text läuft bewusst über Methode.",
+                "Bewusst über mehrere Sekunden und weiter."
+            ),
+            "Der Text läuft bewusst über mehrere Sekunden und weiter."
+        );
+    }
+
+    #[test]
+    fn removes_a_longer_false_suffix_before_the_repeated_anchor() {
+        assert_eq!(
+            merge_overlapping_chunks(
+                "Nach dem Signal folgt der wichtige ist das Wort.",
+                "Der wichtige Abschnitt nach der Benachrichtigung bleibt erhalten."
+            ),
+            "Nach dem Signal folgt der wichtige Abschnitt nach der Benachrichtigung bleibt erhalten."
+        );
+    }
+
+    #[test]
+    fn caps_encoder_frames_to_the_real_unpadded_input() {
+        assert_eq!(scale_valid_frames(800, 800, 100), 100);
+        assert_eq!(scale_valid_frames(760, 800, 100), 95);
+        assert_eq!(scale_valid_frames(1, 800, 100), 1);
+        assert_eq!(scale_valid_frames(0, 800, 100), 0);
+    }
 }
 
 fn build_npu_ffi(path: &Path) -> Result<QnnSession> {

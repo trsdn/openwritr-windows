@@ -5,7 +5,12 @@ use std::sync::{
     atomic::{AtomicBool, AtomicU32, Ordering},
     Arc,
 };
+use std::thread;
+use std::time::{Duration, Instant};
 use tracing::{info, warn};
+
+const STOP_DRAIN_DELAY: Duration = Duration::from_millis(150);
+const MAX_STREAM_RECOVERIES: u32 = 3;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CaptureInfo {
@@ -21,6 +26,8 @@ pub struct Recording {
     pub sample_rate: u32,
     pub channels: u16,
     pub device_name: String,
+    pub drained_samples: usize,
+    pub stream_recoveries: u32,
     pub reached_limit: bool,
     pub stream_error: Option<String>,
 }
@@ -43,6 +50,8 @@ pub struct Recorder {
     active: Mutex<Option<CaptureInfo>>,
     limit_reached: Arc<AtomicBool>,
     stream_error: Arc<Mutex<Option<String>>>,
+    last_callback: Arc<Mutex<Option<Instant>>>,
+    stream_recoveries: AtomicU32,
     stream: Mutex<Option<cpal::Stream>>,
 }
 
@@ -66,6 +75,8 @@ impl Recorder {
             active: Mutex::new(None),
             limit_reached: Arc::new(AtomicBool::new(false)),
             stream_error: Arc::new(Mutex::new(None)),
+            last_callback: Arc::new(Mutex::new(None)),
+            stream_recoveries: AtomicU32::new(0),
             stream: Mutex::new(None),
         })
     }
@@ -98,6 +109,7 @@ impl Recorder {
         let level_cb = self.last_rms_x10000.clone();
         let limit_cb = self.limit_reached.clone();
         let error_cb = self.stream_error.clone();
+        let callback_cb = self.last_callback.clone();
         let recording_error_cb = recording_cb.clone();
         let ch = channels as usize;
         let on_error = move |err: cpal::StreamError| {
@@ -119,6 +131,7 @@ impl Recorder {
                         &recording_cb,
                         &level_cb,
                         &limit_cb,
+                        &callback_cb,
                         |sample| sample,
                     );
                 },
@@ -131,6 +144,7 @@ impl Recorder {
                 let level_cb = self.last_rms_x10000.clone();
                 let limit_cb = self.limit_reached.clone();
                 let error_cb = self.stream_error.clone();
+                let callback_cb = self.last_callback.clone();
                 let recording_error_cb = recording_cb.clone();
                 device.build_input_stream(
                     &stream_config,
@@ -143,6 +157,7 @@ impl Recorder {
                             &recording_cb,
                             &level_cb,
                             &limit_cb,
+                            &callback_cb,
                             i16_to_f32,
                         );
                     },
@@ -161,6 +176,7 @@ impl Recorder {
                 let level_cb = self.last_rms_x10000.clone();
                 let limit_cb = self.limit_reached.clone();
                 let error_cb = self.stream_error.clone();
+                let callback_cb = self.last_callback.clone();
                 let recording_error_cb = recording_cb.clone();
                 device.build_input_stream(
                     &stream_config,
@@ -173,6 +189,7 @@ impl Recorder {
                             &recording_cb,
                             &level_cb,
                             &limit_cb,
+                            &callback_cb,
                             u16_to_f32,
                         );
                     },
@@ -206,6 +223,8 @@ impl Recorder {
         self.last_rms_x10000.store(0, Ordering::Relaxed);
         self.limit_reached.store(false, Ordering::Relaxed);
         self.stream_error.lock().take();
+        *self.last_callback.lock() = Some(Instant::now());
+        self.stream_recoveries.store(0, Ordering::Relaxed);
         // Drop any previous stream before building a new one.
         *self.stream.lock() = None;
         let (stream, info) = self.build_stream(max_record_seconds)?;
@@ -217,21 +236,44 @@ impl Recorder {
     }
 
     pub fn stop(&self) -> Result<Recording> {
-        self.recording.store(false, Ordering::Relaxed);
-        self.last_rms_x10000.store(0, Ordering::Relaxed);
-        // Drop the stream so the device is released between recordings.
-        *self.stream.lock() = None;
         let info = self
             .active
             .lock()
             .take()
             .ok_or_else(|| anyhow!("capture stream is not active"))?;
-        let samples = std::mem::take(&mut *self.samples.lock());
+
+        // WASAPI may still have the final spoken frames queued when the
+        // shortcut is released. Let the active stream deliver that tail
+        // before closing it, which also gives the recognizer brief right-side
+        // context instead of ending exactly on the final phoneme.
+        let should_drain = self.stream.lock().is_some()
+            && self.recording.load(Ordering::Relaxed)
+            && !self.limit_reached.load(Ordering::Relaxed)
+            && self.stream_error.lock().is_none();
+        let samples_before_drain = self.samples.lock().len();
+        if should_drain {
+            thread::sleep(STOP_DRAIN_DELAY);
+        }
+
+        // Take the sample lock before clearing `recording`. This waits for a
+        // callback already writing its buffer, while callbacks arriving after
+        // this point observe `false` and cannot append after the snapshot.
+        let samples = {
+            let mut samples = self.samples.lock();
+            self.recording.store(false, Ordering::Relaxed);
+            std::mem::take(&mut *samples)
+        };
+        self.last_rms_x10000.store(0, Ordering::Relaxed);
+        // Drop the stream so the device is released between recordings.
+        *self.stream.lock() = None;
+        let drained_samples = samples.len().saturating_sub(samples_before_drain);
         Ok(Recording {
             samples,
             sample_rate: info.sample_rate,
             channels: info.channels,
             device_name: info.device_name,
+            drained_samples,
+            stream_recoveries: self.stream_recoveries.swap(0, Ordering::Relaxed),
             reached_limit: self.limit_reached.swap(false, Ordering::Relaxed),
             stream_error: self.stream_error.lock().take(),
         })
@@ -243,6 +285,57 @@ impl Recorder {
 
     pub fn stream_failed(&self) -> bool {
         self.stream_error.lock().is_some()
+    }
+
+    pub fn mark_stream_failed(&self, error: String) {
+        *self.stream_error.lock() = Some(error);
+        self.recording.store(false, Ordering::Relaxed);
+    }
+
+    pub fn callback_stalled(&self, threshold: Duration) -> bool {
+        if self.active.lock().is_none() || self.limit_reached.load(Ordering::Relaxed) {
+            return false;
+        }
+        self.last_callback
+            .lock()
+            .map(|last| last.elapsed() >= threshold)
+            .unwrap_or(false)
+    }
+
+    pub fn recover_stream(&self, max_record_seconds: f32) -> Result<CaptureInfo> {
+        let previous = self
+            .active
+            .lock()
+            .clone()
+            .ok_or_else(|| anyhow!("capture stream is not active"))?;
+        let attempt = self.stream_recoveries.fetch_add(1, Ordering::Relaxed) + 1;
+        if attempt > MAX_STREAM_RECOVERIES {
+            bail!("capture stream recovery limit reached");
+        }
+
+        self.recording.store(false, Ordering::Relaxed);
+        *self.stream.lock() = None;
+        self.stream_error.lock().take();
+        let (stream, info) = self.build_stream(max_record_seconds)?;
+        if info.sample_rate != previous.sample_rate || info.channels != previous.channels {
+            bail!(
+                "capture format changed during recording: {} Hz/{} ch -> {} Hz/{} ch",
+                previous.sample_rate,
+                previous.channels,
+                info.sample_rate,
+                info.channels
+            );
+        }
+
+        *self.last_callback.lock() = Some(Instant::now());
+        self.recording.store(true, Ordering::Relaxed);
+        if let Err(error) = stream.play().context("restart capture stream") {
+            self.recording.store(false, Ordering::Relaxed);
+            return Err(error);
+        }
+        *self.active.lock() = Some(info.clone());
+        *self.stream.lock() = Some(stream);
+        Ok(info)
     }
 }
 
@@ -276,8 +369,10 @@ fn append_interleaved<T: Copy>(
     recording: &AtomicBool,
     level_x10000: &AtomicU32,
     limit_reached: &AtomicBool,
+    last_callback: &Mutex<Option<Instant>>,
     convert: fn(T) -> f32,
 ) {
+    *last_callback.lock() = Some(Instant::now());
     if !recording.load(Ordering::Relaxed) {
         return;
     }
@@ -328,6 +423,7 @@ mod tests {
         let recording = AtomicBool::new(true);
         let level = AtomicU32::new(0);
         let limit = AtomicBool::new(false);
+        let last_callback = Mutex::new(None);
         append_interleaved(
             data,
             channels,
@@ -336,6 +432,7 @@ mod tests {
             &recording,
             &level,
             &limit,
+            &last_callback,
             convert,
         );
         let captured = samples.lock().clone();
@@ -373,6 +470,7 @@ mod tests {
         let recording = AtomicBool::new(true);
         let level = AtomicU32::new(0);
         let limit = AtomicBool::new(false);
+        let last_callback = Mutex::new(None);
         append_interleaved(
             &[0.1, 0.2, 0.3, 0.4],
             1,
@@ -381,6 +479,7 @@ mod tests {
             &recording,
             &level,
             &limit,
+            &last_callback,
             |sample| sample,
         );
         append_interleaved(
@@ -391,6 +490,7 @@ mod tests {
             &recording,
             &level,
             &limit,
+            &last_callback,
             |sample| sample,
         );
 
@@ -420,6 +520,8 @@ mod tests {
             })),
             limit_reached: Arc::new(AtomicBool::new(false)),
             stream_error: Arc::new(Mutex::new(None)),
+            last_callback: Arc::new(Mutex::new(Some(Instant::now()))),
+            stream_recoveries: AtomicU32::new(0),
             stream: Mutex::new(None),
         };
 
@@ -428,5 +530,6 @@ mod tests {
         assert_eq!(recording.channels, 2);
         assert_eq!(recording.device_name, "Switched microphone");
         assert_eq!(recording.samples, vec![0.1, 0.2]);
+        assert_eq!(recording.stream_recoveries, 0);
     }
 }

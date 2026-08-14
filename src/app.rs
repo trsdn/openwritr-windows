@@ -365,8 +365,36 @@ impl AppHandler {
         }
 
         if self.state.record_started.is_some() {
-            if self.state.recorder.stream_failed() {
-                self.finish_recording(false, false);
+            let stream_failed = self.state.recorder.stream_failed();
+            let stream_stalled = self
+                .state
+                .recorder
+                .callback_stalled(Duration::from_millis(500));
+            if stream_failed || stream_stalled {
+                match self
+                    .state
+                    .recorder
+                    .recover_stream(self.state.settings.max_record_seconds)
+                {
+                    Ok(capture) => {
+                        warn!(
+                            stream_failed,
+                            stream_stalled,
+                            device = %capture.device_name,
+                            "capture stream recovered during active recording"
+                        );
+                    }
+                    Err(error) => {
+                        warn!(
+                            stream_failed,
+                            stream_stalled,
+                            error = %error,
+                            "capture stream recovery failed"
+                        );
+                        self.state.recorder.mark_stream_failed(error.to_string());
+                        self.finish_recording(false, false);
+                    }
+                }
             } else {
                 let max_seconds = self.state.settings.max_record_seconds;
                 let timer_limit_reached = self
@@ -645,6 +673,8 @@ impl AppHandler {
                 sample_rate = recording.sample_rate,
                 channels = recording.channels,
                 samples = recording.samples.len(),
+                drained_samples = recording.drained_samples,
+                stream_recoveries = recording.stream_recoveries,
                 reached_limit,
                 "recording stop"
             );
