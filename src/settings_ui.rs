@@ -1,12 +1,13 @@
 //! egui settings dialog launched as a subprocess.
 
 use crate::about;
+use crate::cleanup::{catalog, PromptSource, PromptTarget};
 use crate::credentials::{store_verified, CredentialStore, WindowsCredentialStore};
 use crate::diagnostics;
 use crate::enhance::{self, CopilotReadiness};
 use crate::model_manager::{ModelCacheState, ModelInfo, ModelManager};
 use crate::paths::settings_path;
-use crate::settings::{EnhanceMode, Settings, SettingsRevision};
+use crate::settings::{Enhance, EnhanceMode, Settings, SettingsRevision};
 use crate::single_instance::SettingsTransaction;
 use anyhow::{anyhow, Result};
 use eframe::egui;
@@ -76,6 +77,7 @@ pub fn run_dialog(show_about: bool) -> Result<()> {
                 copilot_readiness: None,
                 copilot_rx: Some(copilot_rx),
                 confirm_discard: false,
+                prompt_editor: PromptEditorState::default(),
                 show_about,
                 about_error: None,
             }))
@@ -127,8 +129,101 @@ struct SettingsApp {
     copilot_readiness: Option<CopilotReadiness>,
     copilot_rx: Option<Receiver<CopilotReadiness>>,
     confirm_discard: bool,
+    prompt_editor: PromptEditorState,
     show_about: bool,
     about_error: Option<String>,
+}
+
+/// Ephemeral editor state. Draft text is never written until the outer
+/// Settings Save button commits the whole settings document.
+#[derive(Default)]
+struct PromptEditorState {
+    draft: Option<PromptDraft>,
+    pending_target_switch: bool,
+    reset_target: Option<PromptTarget>,
+}
+
+struct PromptDraft {
+    target: PromptTarget,
+    text: String,
+    original_target_fields: PromptTargetFields,
+}
+
+struct PromptTargetFields {
+    provider: String,
+    base_url: String,
+    model: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PromptTargetSwitchDecision {
+    Save,
+    Discard,
+    Cancel,
+}
+
+impl PromptEditorState {
+    fn begin_edit(&mut self, target: PromptTarget, prompt: String, enhance: &Enhance) {
+        self.draft = Some(PromptDraft {
+            target,
+            text: prompt,
+            original_target_fields: PromptTargetFields {
+                provider: enhance.provider.clone(),
+                base_url: enhance.base_url.clone(),
+                model: enhance.model.clone(),
+            },
+        });
+        self.pending_target_switch = false;
+    }
+
+    fn cancel_edit(&mut self) {
+        self.draft = None;
+        self.pending_target_switch = false;
+    }
+
+    fn request_target_switch(&mut self, target: &PromptTarget) -> bool {
+        let needs_decision = self
+            .draft
+            .as_ref()
+            .is_some_and(|draft| draft.target != *target);
+        self.pending_target_switch = needs_decision;
+        needs_decision
+    }
+
+    fn resolve_target_switch(
+        &mut self,
+        settings: &mut Settings,
+        decision: PromptTargetSwitchDecision,
+    ) -> bool {
+        let Some(draft) = self.draft.take() else {
+            self.pending_target_switch = false;
+            return false;
+        };
+        let staged = match decision {
+            PromptTargetSwitchDecision::Save => {
+                settings.prompt_overrides.set(draft.target, draft.text);
+                true
+            }
+            PromptTargetSwitchDecision::Discard => false,
+            PromptTargetSwitchDecision::Cancel => {
+                restore_prompt_target_fields(settings, &draft.original_target_fields);
+                self.draft = Some(draft);
+                false
+            }
+        };
+        self.pending_target_switch = false;
+        staged
+    }
+
+    fn has_open_draft(&self) -> bool {
+        self.draft.is_some()
+    }
+}
+
+fn restore_prompt_target_fields(settings: &mut Settings, fields: &PromptTargetFields) {
+    settings.enhance.provider = fields.provider.clone();
+    settings.enhance.base_url = fields.base_url.clone();
+    settings.enhance.model = fields.model.clone();
 }
 
 impl SettingsApp {
@@ -218,6 +313,9 @@ impl SettingsApp {
     }
 
     fn blocking_error(&self) -> Option<String> {
+        if self.prompt_editor.has_open_draft() {
+            return Some("Save or cancel the prompt editor draft before saving Settings.".into());
+        }
         if let Err(error) = self.settings.validate() {
             return Some(error.to_string());
         }
@@ -517,8 +615,18 @@ impl SettingsApp {
                 );
             }
             EnhanceMode::Always => {
+                let shift_is_base_modifier = self
+                    .settings
+                    .hotkey_modifiers
+                    .iter()
+                    .any(|modifier| modifier == "shift");
+                let behavior = if shift_is_base_modifier {
+                    "Every transcript will be improved. Shift is part of the recording shortcut, so the additional-Shift bypass is unavailable."
+                } else {
+                    "Every transcript will be improved. Hold Shift in addition to the recording shortcut to bypass improvement for one transcript."
+                };
                 ui.label(
-                    egui::RichText::new("Every transcript will be improved.")
+                    egui::RichText::new(behavior)
                         .small()
                         .color(secondary_text()),
                 );
@@ -677,6 +785,35 @@ impl SettingsApp {
             }
             self.dirty = true;
         }
+        let mode_explanation = match self.settings.enhance.mode {
+            EnhanceMode::Never => {
+                "Never sends transcript text to an external cleanup provider."
+            }
+            EnhanceMode::WithShift => {
+                "Improves a transcript only when Shift is held in addition to the recording shortcut. Shift cannot also be a base shortcut modifier."
+            }
+            EnhanceMode::Always => {
+                if self
+                    .settings
+                    .hotkey_modifiers
+                    .iter()
+                    .any(|modifier| modifier == "shift")
+                {
+                    "Improves every transcript. The additional-Shift bypass is unavailable because Shift is a base shortcut modifier."
+                } else {
+                    "Improves every transcript. Hold an additional Shift with the recording shortcut to bypass improvement once."
+                }
+            }
+        };
+        ui.label(
+            egui::RichText::new(mode_explanation)
+                .small()
+                .color(secondary_text()),
+        );
+        if let Some(warning) = self.settings.prompt_override_warning() {
+            ui.add_space(6.0);
+            message_frame(ui, &warning, warning_color());
+        }
 
         if self.migration_blocked {
             ui.add_space(8.0);
@@ -693,6 +830,7 @@ impl SettingsApp {
             if !self.migration_blocked {
                 self.render_disabled_credential_summary(ui);
             }
+            self.render_prompt_editor(ui);
             return;
         }
 
@@ -733,6 +871,7 @@ impl SettingsApp {
             "openai_compatible" => self.render_openai_compatible(ui),
             _ => inline_error(ui, "Select a supported enhancement provider."),
         }
+        self.render_prompt_editor(ui);
 
         if let Err(error) = self.settings.validate_enhancement() {
             inline_error(ui, error.to_string());
@@ -775,29 +914,19 @@ impl SettingsApp {
         });
         ui.add_space(6.0);
         ui.label("Model");
-        const MODELS: &[(&str, &str)] = &[
-            ("gpt-5-mini", "GPT-5 Mini"),
-            ("claude-haiku-4.5", "Claude Haiku 4.5"),
-        ];
-        let is_custom = !MODELS
+        let models = catalog::all();
+        let mut selection = copilot_model_picker_value(&self.settings.enhance.model);
+        let selected_label = models
             .iter()
-            .any(|(model, _)| *model == self.settings.enhance.model);
-        let mut selection = if is_custom {
-            "custom".to_string()
-        } else {
-            self.settings.enhance.model.clone()
-        };
-        let selected_label = MODELS
-            .iter()
-            .find(|(model, _)| *model == selection)
-            .map(|(_, label)| *label)
+            .find(|model| model.id == selection)
+            .map(|model| model.display_name)
             .unwrap_or("Custom model ID");
         let before_selection = selection.clone();
         egui::ComboBox::from_id_salt("copilot_model")
             .selected_text(selected_label)
             .show_ui(ui, |ui| {
-                for (model, label) in MODELS {
-                    ui.selectable_value(&mut selection, (*model).into(), *label);
+                for model in models {
+                    ui.selectable_value(&mut selection, model.id.into(), model.display_name);
                 }
                 ui.selectable_value(&mut selection, "custom".into(), "Custom model ID");
             });
@@ -908,6 +1037,131 @@ impl SettingsApp {
                 }
                 self.dirty = true;
             }
+        }
+    }
+
+    fn render_prompt_editor(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(10.0);
+        ui.separator();
+        ui.add_space(6.0);
+        ui.label(egui::RichText::new("Cleanup prompt").strong());
+        ui.label(
+            egui::RichText::new(
+                "Prompts are tuned per provider, endpoint, and exact model or deployment ID.",
+            )
+            .small()
+            .color(secondary_text()),
+        );
+
+        if self.settings.prompt_overrides.preserves_unsupported_raw() {
+            status_label(
+                ui,
+                "This prompt document is preserved for a newer format and cannot be edited here.",
+                warning_color(),
+            );
+            return;
+        }
+
+        let target = match self.settings.prompt_target() {
+            Ok(target) => target,
+            Err(error) => {
+                inline_error(ui, format!("Prompt target is incomplete: {error}"));
+                return;
+            }
+        };
+        self.prompt_editor.request_target_switch(&target);
+
+        ui.add_space(4.0);
+        ui.label(
+            egui::RichText::new(format!("Target: {}", prompt_target_label(&target)))
+                .small()
+                .color(secondary_text()),
+        );
+
+        let resolved = self.settings.resolve_prompt(&target);
+        let source = prompt_source_label(resolved.source);
+        ui.label(
+            egui::RichText::new(format!("Active prompt: {source}"))
+                .small()
+                .color(secondary_text()),
+        );
+
+        if self.prompt_editor.draft.is_some() {
+            let pending_target_switch = self.prompt_editor.pending_target_switch;
+            {
+                let draft = self
+                    .prompt_editor
+                    .draft
+                    .as_mut()
+                    .expect("draft exists while editing");
+                ui.add(
+                    egui::TextEdit::multiline(&mut draft.text)
+                        .desired_rows(8)
+                        .hint_text("Write cleanup instructions"),
+                );
+            }
+            let mut save_draft = false;
+            let mut cancel_draft = false;
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(
+                        !pending_target_switch,
+                        egui::Button::new("Save prompt draft"),
+                    )
+                    .clicked()
+                {
+                    save_draft = true;
+                }
+                if ui
+                    .add_enabled(
+                        !pending_target_switch,
+                        egui::Button::new("Cancel prompt draft"),
+                    )
+                    .clicked()
+                {
+                    cancel_draft = true;
+                }
+            });
+            if save_draft {
+                let draft = self
+                    .prompt_editor
+                    .draft
+                    .take()
+                    .expect("draft exists while saving");
+                self.settings.prompt_overrides.set(draft.target, draft.text);
+                self.prompt_editor.pending_target_switch = false;
+                self.dirty = true;
+            } else if cancel_draft {
+                self.prompt_editor.cancel_edit();
+            }
+            if pending_target_switch {
+                status_label(
+                    ui,
+                    "The target changed while this draft is open. Choose Save, Discard, or Cancel below.",
+                    warning_color(),
+                );
+            }
+        } else {
+            let mut display = resolved.system;
+            ui.add(
+                egui::TextEdit::multiline(&mut display)
+                    .desired_rows(8)
+                    .interactive(false),
+            );
+            ui.horizontal(|ui| {
+                if ui.button("Edit prompt").clicked() {
+                    self.prompt_editor.begin_edit(
+                        target.clone(),
+                        display.clone(),
+                        &self.settings.enhance,
+                    );
+                }
+                if self.settings.prompt_overrides.get(&target).is_some()
+                    && ui.small_button("Reset this target").clicked()
+                {
+                    self.prompt_editor.reset_target = Some(target.clone());
+                }
+            });
         }
     }
 
@@ -1277,6 +1531,67 @@ impl eframe::App for SettingsApp {
             }
         }
 
+        if self.prompt_editor.pending_target_switch {
+            let mut decision = None;
+            let response =
+                egui::Modal::new(egui::Id::new("prompt_target_switch")).show(ctx, |ui| {
+                    ui.heading("Save prompt draft before changing target?");
+                    ui.label(
+                        "The provider, endpoint, or model changed. This draft belongs only to its original target.",
+                    );
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Save draft").clicked() {
+                            decision = Some(PromptTargetSwitchDecision::Save);
+                        }
+                        if ui.button("Discard draft").clicked() {
+                            decision = Some(PromptTargetSwitchDecision::Discard);
+                        }
+                        if ui.button("Cancel target change").clicked() {
+                            decision = Some(PromptTargetSwitchDecision::Cancel);
+                        }
+                    });
+                });
+            if let Some(decision) = decision {
+                self.dirty |= self
+                    .prompt_editor
+                    .resolve_target_switch(&mut self.settings, decision);
+            } else if response.should_close() {
+                self.dirty |= self
+                    .prompt_editor
+                    .resolve_target_switch(&mut self.settings, PromptTargetSwitchDecision::Cancel);
+            }
+        }
+
+        if let Some(target) = self.prompt_editor.reset_target.clone() {
+            let mut reset = false;
+            let mut keep = false;
+            let response = egui::Modal::new(egui::Id::new("reset_prompt_override")).show(
+                ctx,
+                |ui| {
+                    ui.heading("Reset custom prompt?");
+                    ui.label(
+                        "This removes the custom prompt only for the current provider, endpoint, and model target.",
+                    );
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Reset this target").clicked() {
+                            reset = true;
+                        }
+                        if ui.button("Keep custom prompt").clicked() {
+                            keep = true;
+                        }
+                    });
+                },
+            );
+            if reset {
+                self.dirty |= self.settings.prompt_overrides.remove(&target);
+                self.prompt_editor.reset_target = None;
+            } else if keep || response.should_close() {
+                self.prompt_editor.reset_target = None;
+            }
+        }
+
         if self.confirm_discard {
             let mut keep_editing = false;
             let mut discard = false;
@@ -1424,6 +1739,34 @@ fn format_shortcut(settings: &Settings, add_shift: bool) -> String {
         "an incomplete shortcut".into()
     } else {
         parts.join(" + ")
+    }
+}
+
+fn prompt_target_label(target: &PromptTarget) -> String {
+    match target.endpoint() {
+        Some(endpoint) => format!(
+            "OpenAI-compatible · {} · {}",
+            endpoint.base_url(),
+            target.model_id()
+        ),
+        None => format!("GitHub Copilot · {}", target.model_id()),
+    }
+}
+
+fn prompt_source_label(source: PromptSource) -> &'static str {
+    match source {
+        PromptSource::CustomOverride => "custom override",
+        PromptSource::ModelDefault => "bundled model default",
+        PromptSource::ProviderDefault => "bundled provider default",
+        PromptSource::GlobalDefault => "bundled global default",
+    }
+}
+
+fn copilot_model_picker_value(model_id: &str) -> String {
+    if catalog::lookup(model_id).is_some() {
+        model_id.to_string()
+    } else {
+        "custom".to_string()
     }
 }
 
@@ -1614,6 +1957,66 @@ mod tests {
         settings.hotkey_modifiers = vec!["win".into(), "ctrl".into()];
         assert_eq!(format_shortcut(&settings, false), "Ctrl + Win");
         assert_eq!(format_shortcut(&settings, true), "Ctrl + Shift + Win");
+    }
+
+    #[test]
+    fn prompt_editor_switch_save_stages_only_the_original_target() {
+        let original = PromptTarget::github_copilot("custom-a").unwrap();
+        let switched = PromptTarget::github_copilot("custom-b").unwrap();
+        let mut editor = PromptEditorState::default();
+        let mut settings = Settings::default();
+        editor.begin_edit(original.clone(), "draft prompt".into(), &settings.enhance);
+
+        assert!(editor.request_target_switch(&switched));
+        assert!(editor.resolve_target_switch(&mut settings, PromptTargetSwitchDecision::Save));
+
+        assert_eq!(
+            settings.prompt_overrides.get(&original),
+            Some("draft prompt")
+        );
+        assert!(settings.prompt_overrides.get(&switched).is_none());
+        assert!(!editor.has_open_draft());
+    }
+
+    #[test]
+    fn prompt_editor_switch_cancel_restores_target_and_keeps_draft() {
+        let original = PromptTarget::openai_compatible(
+            crate::cleanup::EndpointScope::parse("https://api.example.com/v1").unwrap(),
+            "deployment-a",
+        )
+        .unwrap();
+        let switched = PromptTarget::github_copilot("custom-b").unwrap();
+        let mut editor = PromptEditorState::default();
+        let mut settings = Settings::default();
+        settings.enhance.provider = "openai_compatible".into();
+        settings.enhance.base_url = "HTTPS://API.EXAMPLE.COM:443/v1/".into();
+        settings.enhance.model = "deployment-a".into();
+        editor.begin_edit(original.clone(), "draft prompt".into(), &settings.enhance);
+        settings.enhance.provider = "github_copilot".into();
+        settings.enhance.model = "custom-b".into();
+
+        assert!(editor.request_target_switch(&switched));
+        assert!(!editor.resolve_target_switch(&mut settings, PromptTargetSwitchDecision::Cancel));
+
+        assert_eq!(settings.prompt_target().unwrap(), original);
+        assert_eq!(settings.enhance.base_url, "HTTPS://API.EXAMPLE.COM:443/v1/");
+        assert!(editor.has_open_draft());
+        assert!(!editor.pending_target_switch);
+    }
+
+    #[test]
+    fn advisory_picker_keeps_custom_model_ids_as_custom() {
+        assert_eq!(copilot_model_picker_value("gpt-5.6-luna"), "gpt-5.6-luna");
+        assert_eq!(
+            copilot_model_picker_value("my-private/deployment-v42"),
+            "custom"
+        );
+        let mut settings = Settings::default();
+        settings.enhance.model = "my-private/deployment-v42".into();
+        assert_eq!(
+            settings.enhance.model, "my-private/deployment-v42",
+            "custom picker selection must not replace the configured ID"
+        );
     }
 
     #[test]

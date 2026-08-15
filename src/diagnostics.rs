@@ -299,7 +299,12 @@ fn redact_secrets(value: &mut Value) {
         Value::Object(map) => {
             for (key, value) in map {
                 let normalized = key.to_ascii_lowercase();
-                if ["api_key", "token", "secret", "password", "authorization"]
+                if normalized == "prompt_overrides" {
+                    // This can contain both custom prompt text and raw,
+                    // forward-compatible rejected entries. Never include
+                    // either in diagnostics.
+                    *value = Value::String("<redacted prompt overrides>".into());
+                } else if ["api_key", "token", "secret", "password", "authorization"]
                     .iter()
                     .any(|sensitive| normalized.contains(sensitive))
                 {
@@ -462,6 +467,26 @@ mod tests {
         assert!(!serialized.contains("secret-value"));
         assert!(!serialized.contains("token-value"));
         assert!(serialized.contains("visible"));
+    }
+
+    #[test]
+    fn redacts_prompt_overrides_including_rejected_raw_entries() {
+        let mut value = json!({
+            "prompt_overrides": {
+                "version": 1,
+                "entries": [
+                    {"provider": "github_copilot", "model_id": "gpt-5-mini", "prompt": "private tuned prompt"},
+                    {"unexpected": "private rejected raw entry"}
+                ]
+            }
+        });
+
+        redact_secrets(&mut value);
+
+        let serialized = serde_json::to_string(&value).unwrap();
+        assert!(!serialized.contains("private tuned prompt"));
+        assert!(!serialized.contains("private rejected raw entry"));
+        assert!(serialized.contains("<redacted prompt overrides>"));
     }
 
     #[test]

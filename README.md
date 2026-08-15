@@ -77,12 +77,14 @@ about 2.2 GB after extraction.
 |---|---|
 | **Hold Ctrl + Win** | Record. Release to transcribe and paste at the caret. |
 | **Optional: hold the configured shortcut + Shift** | Run text cleanup when enhancement mode is set to **Additional Shift**. |
+| **Hold Shift with the shortcut in Always mode** | Bypass cleanup for that recording and deliver the raw transcript. |
 | **Tray right-click → Settings** | Change hotkey, engine, LLM provider. |
 
-A small dark pill appears at the bottom-center of the primary monitor while
-recording, with white bars that breathe with your voice. It also shows short
-status and error messages. Settings changes take effect after saving — no
-restart required.
+A small dark pill appears at the bottom-center of the primary monitor. It
+distinguishes raw and enhanced listening, queued work, transcription,
+enhancement, success, safe raw fallbacks, provider/credential warnings, and
+errors. Active recording always takes priority over background job status.
+Settings changes take effect after saving — no restart required.
 
 ## Settings
 
@@ -97,14 +99,26 @@ Tray icon → right-click → **Settings**. All fields:
   first-use download size, and local cache status. NPU engines remain visible
   but disabled unless the ARM64 build is running on Snapdragon X Elite.
 - **Output and feedback**: either paste into the active app or keep the
-  transcript on the clipboard. The overlay option covers both the recording
-  waveform and status messages. Start/stop sounds are optional.
+  transcript on the clipboard. Auto-paste is tied to the foreground top-level
+  window captured when recording starts. If focus or the target process
+  changes, or another recording is active when the job completes, OpenWritr
+  does not inject keystrokes: it copies the final text to the clipboard and
+  shows a warning. Copy-only mode always remains explicit. The overlay option
+  covers both the recording waveform and typed job/status messages.
+  Start/stop sounds are optional.
 - **Text enhancement**: choose **Never**, **When Shift is additionally held**,
   or **Always**, then select GitHub Copilot or an OpenAI-compatible API.
+  In **Always** mode, additionally holding Shift bypasses cleanup for that
+  recording. The model picker provides advisory presets while preserving
+  arbitrary provider-specific model or deployment IDs and legacy settings.
   GitHub mode checks that `gh` is installed and authenticated. OpenAI-compatible
   mode requires a valid base URL, model ID, and API key. API keys are stored in
-  Windows Credential Manager, not in the settings file. If cleanup fails, the
-  raw transcript is still delivered and OpenWritr shows a warning.
+  Windows Credential Manager, not in the settings file. Cleanup prompts can be
+  customized per exact provider, endpoint, and model target; transcript text
+  stays a separate untrusted user message. Provider/credential failures use
+  the raw transcript with a provider warning. Empty or critically changed
+  output, or an integrity-validator failure, also falls back to the raw
+  transcript with a distinct safety warning.
 - **Advanced**: set the maximum recording duration.
 - **About, credits & support** (also available directly from the tray menu):
   view the installed version and architecture,
@@ -142,7 +156,10 @@ openwritr-windows/
 │   │   └── qnn_ffi.rs       reusable typed QNN C-API sessions
 │   ├── enhance.rs           Copilot / OpenAI cleanup pass
 │   ├── sounds.rs            G3/E3 tone synth (start/stop pings)
-│   └── bin/package.rs       distributable-zip builder
+│   └── bin/
+│       ├── package.rs       distributable-zip builder
+│       └── cleanup_eval/    opt-in offline/live evaluator for the `cleanup`
+│                            core (see Development section below)
 └── Cargo.toml
 ```
 
@@ -309,6 +326,44 @@ python scripts/fetch_runtime.py --arch x64
 
 See [`docs/RUNTIME_COMPATIBILITY.md`](docs/RUNTIME_COMPATIBILITY.md) for
 the shared ORT/QNN/QAIRT contract and its Snapdragon hardware gates.
+
+### Cleanup evaluator (`cleanup_eval`)
+
+`src/bin/cleanup_eval/` is a focused, opt-in evaluator for the `cleanup`
+core (prompt resolution, request/response handling, normalization, and the
+integrity validator) — it reuses those production modules directly rather
+than reimplementing them. It replays a committed, versioned, fully
+synthetic DE/EN fixture corpus
+([`fixtures/cleanup-eval/v1/corpus.json`](fixtures/cleanup-eval/v1/corpus.json))
+covering punctuation, fillers, repetition, negation, digits/dates/times/
+versions, commands/code/acronyms, URLs/emails, language preservation,
+filler-only/`[[EMPTY]]`, and known tricky cases. No private dictation is
+included or ever required.
+
+```powershell
+# Deterministic offline mode (default): no network, safe for CI.
+cargo run --bin cleanup_eval
+cargo run --bin cleanup_eval -- --json --category punctuation
+
+# Focused tests: corpus versioning, expected decisions, no private fields
+# in the serialized report, and production-module reuse.
+cargo test --bin cleanup_eval
+```
+
+Live-provider mode is entirely opt-in (`--live`) and never required by tests
+or releases: it reads the same `settings.json` provider/model/base URL and
+the same credential storage the app uses (GitHub CLI token or Windows
+Credential Manager), but never prints secrets, transcripts, prompts, or raw
+candidate text. Every report — offline or live — includes the model/
+provider, canonical endpoint scope, prompt-profile/validator/corpus
+version, latency, failure/integrity category counts, and punctuation/
+filler/repetition health scores, with all content redacted by default:
+
+```powershell
+cargo run --bin cleanup_eval -- --live --provider github_copilot
+```
+
+Run `cargo run --bin cleanup_eval -- --help` for the full flag list.
 
 ## Releases
 

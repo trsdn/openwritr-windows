@@ -1,11 +1,17 @@
+use crate::cleanup::{
+    self, EndpointScope, EnhanceProvider, PromptOverrides, PromptTarget, PromptTargetError,
+    ResolvedPrompt,
+};
 use crate::credentials::{
     store_verified, CredentialError, CredentialStore, WindowsCredentialStore,
 };
 use crate::paths::settings_path;
 use crate::single_instance::SettingsTransaction;
 use serde::{Deserialize, Deserializer, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
+use std::fmt;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -33,7 +39,7 @@ const VALID_TRIGGERS: &[&str] = &[
     "f20",
 ];
 const VALID_ENGINES: &[&str] = &["parakeet_cpu", "parakeet_npu", "whisper_npu"];
-const VALID_ENHANCE_PROVIDERS: &[&str] = &["github_copilot", "openai_compatible"];
+const PROMPT_OVERRIDES_VERSION: u64 = 1;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -66,6 +72,15 @@ impl Default for Enhance {
             base_url: "https://api.openai.com/v1".into(),
             model: "claude-haiku-4.5".into(),
         }
+    }
+}
+
+impl Enhance {
+    /// Converts the persisted wire value to the typed provider used by the
+    /// cleanup core. The field remains a string to preserve legacy JSON,
+    /// including the `off` migration handled below.
+    pub fn provider(&self) -> Result<EnhanceProvider, crate::cleanup::UnknownProvider> {
+        EnhanceProvider::from_settings_str(&self.provider)
     }
 }
 
@@ -109,6 +124,210 @@ impl<'de> Deserialize<'de> for Enhance {
     }
 }
 
+/// Versioned, forward-compatible prompt override document.
+///
+/// Entries that are structurally valid become runtime overrides. Rejected
+/// entries are kept as raw JSON so opening and saving Settings never destroys
+/// a newer or malformed prompt configuration. Prompt text is intentionally
+/// omitted from the `Debug` representation.
+#[derive(Clone, Default, PartialEq)]
+pub struct PromptOverridesDocument {
+    overrides: HashMap<PromptTarget, String>,
+    rejected_entries: Vec<Value>,
+    preserved_raw: Option<Value>,
+}
+
+impl fmt::Debug for PromptOverridesDocument {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let issue = self.warning();
+        f.debug_struct("PromptOverridesDocument")
+            .field("runtime_override_count", &self.overrides.len())
+            .field("rejected_entry_count", &self.rejected_entries.len())
+            .field("has_preserved_raw", &self.preserved_raw.is_some())
+            .field("warning", &issue)
+            .finish()
+    }
+}
+
+impl PromptOverridesDocument {
+    pub fn get(&self, target: &PromptTarget) -> Option<&str> {
+        self.overrides.get(target).map(String::as_str)
+    }
+
+    pub fn set(&mut self, target: PromptTarget, prompt: String) {
+        let prompt = prompt.trim();
+        if prompt.is_empty() {
+            self.overrides.remove(&target);
+        } else {
+            self.overrides.insert(target, prompt.to_string());
+        }
+    }
+
+    pub fn remove(&mut self, target: &PromptTarget) -> bool {
+        self.overrides.remove(target).is_some()
+    }
+
+    pub fn warning(&self) -> Option<String> {
+        if self.preserved_raw.is_some() {
+            return Some(
+                "Prompt overrides use an unsupported or malformed document format. The raw document is preserved, but its prompts are ignored."
+                    .into(),
+            );
+        }
+        let count = self.rejected_entries.len();
+        (count > 0).then(|| {
+            format!(
+                "{count} malformed prompt override {} preserved and ignored.",
+                if count == 1 {
+                    "entry is"
+                } else {
+                    "entries are"
+                }
+            )
+        })
+    }
+
+    pub fn preserves_unsupported_raw(&self) -> bool {
+        self.preserved_raw.is_some()
+    }
+
+    fn parse(raw: Value) -> Self {
+        if raw.is_null() {
+            // A `null` `prompt_overrides` field is equivalent to it being
+            // absent: treat it as the empty/default document rather than an
+            // unsupported format that must be preserved verbatim (and
+            // warned about). Genuinely malformed/unsupported non-null
+            // documents (wrong shape, unknown version, etc.) still fall
+            // through to the lenient "preserve as raw" behavior below.
+            return Self::default();
+        }
+        let Some(document) = raw.as_object() else {
+            return Self {
+                preserved_raw: Some(raw),
+                ..Self::default()
+            };
+        };
+        let Some(version) = document.get("version").and_then(Value::as_u64) else {
+            return Self {
+                preserved_raw: Some(raw),
+                ..Self::default()
+            };
+        };
+        if version != PROMPT_OVERRIDES_VERSION {
+            return Self {
+                preserved_raw: Some(raw),
+                ..Self::default()
+            };
+        }
+        let Some(entries) = document.get("entries").and_then(Value::as_array) else {
+            return Self {
+                preserved_raw: Some(raw),
+                ..Self::default()
+            };
+        };
+
+        let mut parsed = Self::default();
+        for entry in entries {
+            match parse_prompt_override_entry(entry) {
+                Ok((target, prompt)) if !parsed.overrides.contains_key(&target) => {
+                    parsed.overrides.insert(target, prompt);
+                }
+                Ok(_) | Err(()) => parsed.rejected_entries.push(entry.clone()),
+            }
+        }
+        parsed
+    }
+
+    fn serialized_entries(&self) -> Vec<Value> {
+        let mut entries: Vec<_> = self
+            .overrides
+            .iter()
+            .map(|(target, prompt)| prompt_override_entry(target, prompt))
+            .collect();
+        entries.sort_by(|left, right| {
+            serde_json::to_string(left)
+                .expect("prompt override entry serializes")
+                .cmp(&serde_json::to_string(right).expect("prompt override entry serializes"))
+        });
+        entries.extend(self.rejected_entries.iter().cloned());
+        entries
+    }
+}
+
+impl PromptOverrides for PromptOverridesDocument {
+    fn lookup(&self, target: &PromptTarget) -> Option<String> {
+        self.get(target).map(str::to_string)
+    }
+}
+
+impl Serialize for PromptOverridesDocument {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match &self.preserved_raw {
+            Some(raw) => raw.serialize(serializer),
+            None => json!({
+                "version": PROMPT_OVERRIDES_VERSION,
+                "entries": self.serialized_entries(),
+            })
+            .serialize(serializer),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for PromptOverridesDocument {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Ok(Self::parse(Value::deserialize(deserializer)?))
+    }
+}
+
+fn parse_prompt_override_entry(entry: &Value) -> Result<(PromptTarget, String), ()> {
+    let object = entry.as_object().ok_or(())?;
+    let provider = object
+        .get("provider")
+        .and_then(Value::as_str)
+        .and_then(|provider| EnhanceProvider::from_settings_str(provider).ok())
+        .ok_or(())?;
+    let model_id = object.get("model_id").and_then(Value::as_str).ok_or(())?;
+    let prompt = object
+        .get("prompt")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|prompt| !prompt.is_empty())
+        .ok_or(())?
+        .to_string();
+    let target = match provider {
+        EnhanceProvider::GithubCopilot => PromptTarget::github_copilot(model_id),
+        EnhanceProvider::OpenAiCompatible => {
+            let endpoint = object.get("endpoint").and_then(Value::as_str).ok_or(())?;
+            let endpoint = EndpointScope::parse(endpoint).map_err(|_| ())?;
+            PromptTarget::openai_compatible(endpoint, model_id)
+        }
+    }
+    .map_err(|_: PromptTargetError| ())?;
+    Ok((target, prompt))
+}
+
+fn prompt_override_entry(target: &PromptTarget, prompt: &str) -> Value {
+    match target {
+        PromptTarget::GithubCopilot { model_id } => json!({
+            "provider": EnhanceProvider::GithubCopilot.as_str(),
+            "model_id": model_id,
+            "prompt": prompt,
+        }),
+        PromptTarget::OpenAiCompatible { endpoint, model_id } => json!({
+            "provider": EnhanceProvider::OpenAiCompatible.as_str(),
+            "endpoint": endpoint.base_url(),
+            "model_id": model_id,
+            "prompt": prompt,
+        }),
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -121,6 +340,7 @@ pub struct Settings {
     pub min_record_seconds: f32,
     pub max_record_seconds: f32,
     pub enhance: Enhance,
+    pub prompt_overrides: PromptOverridesDocument,
 }
 
 impl Default for Settings {
@@ -135,6 +355,7 @@ impl Default for Settings {
             min_record_seconds: 0.25,
             max_record_seconds: 60.0,
             enhance: Enhance::default(),
+            prompt_overrides: PromptOverridesDocument::default(),
         }
     }
 }
@@ -268,12 +489,10 @@ impl Settings {
     }
 
     pub fn validate_enhancement(&self) -> Result<(), SettingsError> {
-        if !VALID_ENHANCE_PROVIDERS.contains(&self.enhance.provider.as_str()) {
-            return Err(SettingsError::Validation(format!(
-                "unsupported enhancement provider `{}`",
-                self.enhance.provider
-            )));
-        }
+        let provider = self
+            .enhance
+            .provider()
+            .map_err(|error| SettingsError::Validation(error.to_string()))?;
         if !self.enhance.mode.is_enabled() {
             return Ok(());
         }
@@ -282,17 +501,43 @@ impl Settings {
                 "enhancement model ID must not be empty".into(),
             ));
         }
-        if self.enhance.provider == "openai_compatible" {
-            let url = reqwest::Url::parse(self.enhance.base_url.trim()).map_err(|error| {
+        if provider.requires_endpoint_scope() {
+            EndpointScope::parse(&self.enhance.base_url).map_err(|error| {
                 SettingsError::Validation(format!("OpenAI-compatible base URL is invalid: {error}"))
             })?;
-            if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
-                return Err(SettingsError::Validation(
-                    "OpenAI-compatible base URL must be an HTTP(S) URL with a host".into(),
-                ));
-            }
         }
         Ok(())
+    }
+
+    /// Builds the exact cleanup prompt target represented by the current
+    /// provider/model/endpoint fields. Model IDs are trimmed by the core.
+    pub fn prompt_target(&self) -> Result<PromptTarget, SettingsError> {
+        let provider = self
+            .enhance
+            .provider()
+            .map_err(|error| SettingsError::Validation(error.to_string()))?;
+        match provider {
+            EnhanceProvider::GithubCopilot => PromptTarget::github_copilot(&self.enhance.model),
+            EnhanceProvider::OpenAiCompatible => {
+                let endpoint = EndpointScope::parse(&self.enhance.base_url).map_err(|error| {
+                    SettingsError::Validation(format!(
+                        "OpenAI-compatible base URL is invalid: {error}"
+                    ))
+                })?;
+                PromptTarget::openai_compatible(endpoint, &self.enhance.model)
+            }
+        }
+        .map_err(|error| SettingsError::Validation(error.to_string()))
+    }
+
+    /// Resolves the configured prompt through the cleanup core's precedence
+    /// layers: exact custom target, bundled model, provider, then global.
+    pub fn resolve_prompt(&self, target: &PromptTarget) -> ResolvedPrompt {
+        cleanup::resolve_prompt(target, &self.prompt_overrides)
+    }
+
+    pub fn prompt_override_warning(&self) -> Option<String> {
+        self.prompt_overrides.warning()
     }
 
     fn validate_non_shortcut_fields(&self) -> Result<(), SettingsError> {
@@ -750,6 +995,203 @@ mod tests {
     }
 
     #[test]
+    fn existing_settings_without_prompt_overrides_load_normally() {
+        let mut document = serde_json::to_value(Settings::default()).unwrap();
+        document.as_object_mut().unwrap().remove("prompt_overrides");
+
+        let settings: Settings = serde_json::from_value(document).unwrap();
+
+        assert!(settings
+            .prompt_overrides
+            .get(&PromptTarget::github_copilot("claude-haiku-4.5").unwrap())
+            .is_none());
+        assert!(settings.prompt_override_warning().is_none());
+    }
+
+    #[test]
+    fn null_prompt_overrides_are_treated_as_empty_default() {
+        let mut document = serde_json::to_value(Settings::default()).unwrap();
+        document["prompt_overrides"] = Value::Null;
+
+        let settings: Settings = serde_json::from_value(document).unwrap();
+
+        assert!(settings
+            .prompt_overrides
+            .get(&PromptTarget::github_copilot("claude-haiku-4.5").unwrap())
+            .is_none());
+        assert!(!settings.prompt_overrides.preserves_unsupported_raw());
+        assert!(settings.prompt_override_warning().is_none());
+    }
+
+    #[test]
+    fn null_prompt_overrides_round_trip_without_preserving_the_raw_null() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("settings.json");
+        let mut document = serde_json::to_value(Settings::default()).unwrap();
+        document["prompt_overrides"] = Value::Null;
+        fs::write(&path, serde_json::to_vec(&document).unwrap()).unwrap();
+
+        let mut settings = Settings::load_from(&path).unwrap();
+        settings.overlay = false;
+        settings.save_to(&path).unwrap();
+
+        let saved: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        // Once loaded and re-saved, `null` is normalized to the versioned
+        // empty document, not preserved as a literal `null`.
+        assert_ne!(saved["prompt_overrides"], Value::Null);
+        assert_eq!(saved["prompt_overrides"]["version"], json!(1));
+        assert_eq!(saved["prompt_overrides"]["entries"], json!([]));
+    }
+
+    #[test]
+    fn non_null_non_object_prompt_overrides_are_still_preserved_as_unsupported() {
+        // Only `null` gets the lenient "treat as empty/default" behavior;
+        // any other genuinely malformed/unsupported shape still falls
+        // through to the existing preserve-raw-and-warn behavior.
+        let mut document = serde_json::to_value(Settings::default()).unwrap();
+        document["prompt_overrides"] = json!("not an object");
+
+        let settings: Settings = serde_json::from_value(document).unwrap();
+
+        assert!(settings.prompt_overrides.preserves_unsupported_raw());
+        assert!(settings.prompt_override_warning().is_some());
+    }
+
+    #[test]
+    fn prompt_overrides_canonicalize_targets_and_resolve_custom_prompts() {
+        let document = json!({
+            "prompt_overrides": {
+                "version": 1,
+                "entries": [{
+                    "provider": "openai_compatible",
+                    "endpoint": "HTTPS://API.EXAMPLE.COM:443/v1/",
+                    "model_id": "  deployment-a  ",
+                    "prompt": "  custom cleanup prompt  "
+                }]
+            }
+        });
+        let settings: Settings = serde_json::from_value(document).unwrap();
+        let target = PromptTarget::openai_compatible(
+            EndpointScope::parse("https://api.example.com/v1").unwrap(),
+            "deployment-a",
+        )
+        .unwrap();
+
+        assert_eq!(
+            settings.prompt_overrides.get(&target),
+            Some("custom cleanup prompt")
+        );
+        let resolved = settings.resolve_prompt(&target);
+        assert_eq!(resolved.source, cleanup::PromptSource::CustomOverride);
+        assert_eq!(resolved.system, "custom cleanup prompt");
+    }
+
+    #[test]
+    fn malformed_prompt_entries_are_ignored_without_disabling_core_settings() {
+        let mut document = serde_json::to_value(Settings::default()).unwrap();
+        document["prompt_overrides"] = json!({
+            "version": 1,
+            "entries": [
+                {
+                    "provider": "github_copilot",
+                    "model_id": "future-model",
+                    "prompt": "use careful cleanup"
+                },
+                {"provider": "not-a-provider", "prompt": "private rejected prompt"},
+                "also malformed"
+            ]
+        });
+
+        let settings: Settings = serde_json::from_value(document).unwrap();
+        let target = PromptTarget::github_copilot("future-model").unwrap();
+
+        assert_eq!(
+            settings.prompt_overrides.get(&target),
+            Some("use careful cleanup")
+        );
+        assert_eq!(
+            settings.resolve_prompt(&target).source,
+            cleanup::PromptSource::CustomOverride
+        );
+        assert!(settings
+            .prompt_override_warning()
+            .unwrap()
+            .contains("2 malformed"));
+        assert!(settings.validate().is_ok());
+    }
+
+    #[test]
+    fn malformed_prompt_entries_round_trip_across_unrelated_saves() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("settings.json");
+        let rejected = json!({"provider": "future", "prompt": "do not lose me"});
+        let mut document = serde_json::to_value(Settings::default()).unwrap();
+        document["prompt_overrides"] = json!({
+            "version": 1,
+            "entries": [
+                {
+                    "provider": "github_copilot",
+                    "model_id": "arbitrary-model-id",
+                    "prompt": "kept runtime prompt"
+                },
+                rejected.clone()
+            ]
+        });
+        fs::write(&path, serde_json::to_vec(&document).unwrap()).unwrap();
+
+        let mut settings = Settings::load_from(&path).unwrap();
+        settings.overlay = false;
+        settings.save_to(&path).unwrap();
+
+        let saved: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        let entries = saved["prompt_overrides"]["entries"].as_array().unwrap();
+        assert!(entries.iter().any(|entry| entry == &rejected));
+        assert!(entries.iter().any(|entry| {
+            entry["model_id"] == "arbitrary-model-id" && entry["prompt"] == "kept runtime prompt"
+        }));
+    }
+
+    #[test]
+    fn unsupported_prompt_document_is_preserved_across_unrelated_saves() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("settings.json");
+        let raw = json!({
+            "version": 99,
+            "new_schema": {"private": "future prompt", "entries": [1, 2, 3]}
+        });
+        let mut document = serde_json::to_value(Settings::default()).unwrap();
+        document["prompt_overrides"] = raw.clone();
+        fs::write(&path, serde_json::to_vec(&document).unwrap()).unwrap();
+
+        let mut settings = Settings::load_from(&path).unwrap();
+        settings.sounds = false;
+        settings.save_to(&path).unwrap();
+
+        let saved: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        assert_eq!(saved["prompt_overrides"], raw);
+        assert!(settings.prompt_overrides.preserves_unsupported_raw());
+        assert!(settings.prompt_override_warning().is_some());
+    }
+
+    #[test]
+    fn arbitrary_model_ids_are_preserved_in_prompt_override_round_trips() {
+        let target = PromptTarget::github_copilot("  my-company/deployment-42  ").unwrap();
+        let mut settings = Settings::default();
+        settings
+            .prompt_overrides
+            .set(target.clone(), "custom prompt".into());
+
+        let reloaded: Settings =
+            serde_json::from_value(serde_json::to_value(&settings).unwrap()).unwrap();
+
+        assert_eq!(
+            reloaded.prompt_overrides.get(&target),
+            Some("custom prompt")
+        );
+        assert_eq!(target.model_id(), "my-company/deployment-42");
+    }
+
+    #[test]
     fn validates_safe_shortcut_classes() {
         let mut settings = Settings::default();
         assert!(settings.validate_shortcut().is_ok());
@@ -847,6 +1289,27 @@ mod tests {
         assert!(error.to_string().contains("replace settings file"));
         assert_eq!(fs::read(&path).unwrap(), b"previous");
         assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn deleting_an_existing_settings_file_changes_revision_and_loads_defaults() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("settings.json");
+        let mut configured = Settings::default();
+        configured.hotkey_trigger = "f13".into();
+        configured.save_to(&path).unwrap();
+        let existing_revision = Settings::revision_from(&path).unwrap();
+
+        fs::remove_file(&path).unwrap();
+
+        let deleted_revision = Settings::revision_from(&path).unwrap();
+        assert_ne!(existing_revision, deleted_revision);
+        let reloaded = Settings::load_from(&path).unwrap();
+        assert_eq!(
+            reloaded.hotkey_modifiers,
+            Settings::default().hotkey_modifiers
+        );
+        assert_eq!(reloaded.hotkey_trigger, Settings::default().hotkey_trigger);
     }
 
     #[test]

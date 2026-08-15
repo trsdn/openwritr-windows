@@ -1,6 +1,6 @@
 [package]
 name = "openwritr"
-version = "0.5.2"
+version = "0.6.0"
 edition = "2021"
 description = "Native push-to-talk voice-to-text for Windows"
 license = "MIT"
@@ -21,6 +21,14 @@ path = "src/main.rs"
 [[bin]]
 name = "package"
 path = "src/bin/package.rs"
+
+# Focused, opt-in evaluator for the `cleanup` core (see
+# `src/bin/cleanup_eval/main.rs`). Deterministic offline mode is exercised by
+# `cargo test --bin cleanup_eval`; live-provider mode is opt-in only and never
+# required by tests or releases.
+[[bin]]
+name = "cleanup_eval"
+path = "src/bin/cleanup_eval/main.rs"
 
 [dependencies]
 # Tray + window event loop
@@ -79,6 +87,7 @@ windows = { version = "0.62", features = [
     "Win32_System_Com",
     "Win32_System_Console",
     "Win32_System_LibraryLoader",
+    "Win32_System_Ole",
     "Win32_System_Registry",
     "Win32_UI_WindowsAndMessaging",
     "Win32_UI_Input_KeyboardAndMouse",
@@ -92,6 +101,7 @@ windows-sys = { version = "0.59", features = [
     "Win32_Security",
     "Win32_Storage_FileSystem",
     "Win32_System_DataExchange",
+    "Win32_System_Memory",
     "Win32_System_Threading",
 ] }
 

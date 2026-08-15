@@ -14,7 +14,7 @@ use tracing::{info, warn};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Event {
-    Press,
+    Press { shift_down: bool },
     Release,
 }
 
@@ -26,7 +26,7 @@ pub struct HotkeyManager {
 impl HotkeyManager {
     pub fn register(s: &Settings) -> Result<Self> {
         // Modifiers-only mode: skip OS RegisterHotKey (which needs a key).
-        // The poll loop handles detection via GetAsyncKeyState.
+        // The low-level key-hook poll loop handles detection.
         if s.hotkey_trigger == "none" || s.hotkey_trigger.is_empty() {
             return Err(anyhow::anyhow!("modifiers-only mode (no OS reservation)"));
         }
@@ -179,6 +179,17 @@ pub struct PollState {
     pub pressed: bool,
 }
 
+/// Clear a poll state before replacing it. If the old shortcut was held,
+/// return its release edge exactly once so callers can stop active recording.
+pub fn release_before_reset(state: &mut PollState) -> Option<Event> {
+    if state.pressed {
+        state.pressed = false;
+        Some(Event::Release)
+    } else {
+        None
+    }
+}
+
 /// Edge-detecting combo poll. Reads physical key state from the global
 /// low-level keyboard hook (see `crate::key_hook`), which is immune to
 /// the focus-change synthesised key-ups that fool `GetAsyncKeyState`.
@@ -187,7 +198,7 @@ pub struct PollState {
 /// modifiers-only.
 pub fn poll_combo(trigger_vk: u32, mod_vks: &[u32], state: &mut PollState) -> Option<Event> {
     let combo = combo_is_down(trigger_vk, mod_vks, configured_key_down);
-    update_combo_state(combo, state)
+    update_combo_state(combo, state, crate::key_hook::shift_is_down)
 }
 
 fn combo_is_down(trigger_vk: u32, mod_vks: &[u32], key_down: impl Fn(u32) -> bool) -> bool {
@@ -197,10 +208,16 @@ fn combo_is_down(trigger_vk: u32, mod_vks: &[u32], key_down: impl Fn(u32) -> boo
     has_configured_key && trigger_down && mods_down
 }
 
-fn update_combo_state(combo: bool, state: &mut PollState) -> Option<Event> {
+fn update_combo_state(
+    combo: bool,
+    state: &mut PollState,
+    sample_shift: impl FnOnce() -> bool,
+) -> Option<Event> {
     if combo && !state.pressed {
         state.pressed = true;
-        return Some(Event::Press);
+        return Some(Event::Press {
+            shift_down: sample_shift(),
+        });
     }
     if !combo && state.pressed {
         state.pressed = false;
@@ -211,7 +228,7 @@ fn update_combo_state(combo: bool, state: &mut PollState) -> Option<Event> {
 
 #[cfg(test)]
 mod tests {
-    use super::{combo_is_down, update_combo_state, Event, PollState};
+    use super::{combo_is_down, release_before_reset, update_combo_state, Event, PollState};
 
     #[test]
     fn standalone_trigger_does_not_require_modifiers() {
@@ -221,14 +238,62 @@ mod tests {
     }
 
     #[test]
-    fn combo_edges_remain_correct_after_recovery_reset() {
+    fn hook_recovery_emits_one_release_when_reset_while_pressed() {
         let mut state = PollState::default();
-        assert_eq!(update_combo_state(true, &mut state), Some(Event::Press));
-        assert_eq!(update_combo_state(true, &mut state), None);
+        assert_eq!(
+            update_combo_state(true, &mut state, || true),
+            Some(Event::Press { shift_down: true })
+        );
+        assert_eq!(update_combo_state(true, &mut state, || false), None);
 
-        state = PollState::default();
-        assert_eq!(update_combo_state(false, &mut state), None);
-        assert_eq!(update_combo_state(true, &mut state), Some(Event::Press));
-        assert_eq!(update_combo_state(false, &mut state), Some(Event::Release));
+        assert_eq!(release_before_reset(&mut state), Some(Event::Release));
+        assert_eq!(release_before_reset(&mut state), None);
+        assert_eq!(update_combo_state(false, &mut state, || true), None);
+        assert_eq!(
+            update_combo_state(true, &mut state, || false),
+            Some(Event::Press { shift_down: false })
+        );
+        assert_eq!(
+            update_combo_state(false, &mut state, || true),
+            Some(Event::Release)
+        );
+    }
+
+    #[test]
+    fn shortcut_change_emits_one_release_when_reconfigured_while_pressed() {
+        let mut state = PollState { pressed: true };
+
+        assert_eq!(release_before_reset(&mut state), Some(Event::Release));
+        assert!(!state.pressed);
+        assert_eq!(release_before_reset(&mut state), None);
+    }
+
+    #[test]
+    fn shift_is_sampled_only_on_the_accepted_press_edge() {
+        let mut state = PollState::default();
+        let mut samples = 0;
+
+        assert_eq!(
+            update_combo_state(true, &mut state, || {
+                samples += 1;
+                true
+            }),
+            Some(Event::Press { shift_down: true })
+        );
+        assert_eq!(
+            update_combo_state(true, &mut state, || {
+                samples += 1;
+                false
+            }),
+            None
+        );
+        assert_eq!(
+            update_combo_state(false, &mut state, || {
+                samples += 1;
+                false
+            }),
+            Some(Event::Release)
+        );
+        assert_eq!(samples, 1);
     }
 }

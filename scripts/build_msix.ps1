@@ -11,7 +11,7 @@
 # Usage:
 #   .\scripts\build_msix.ps1 -IdentityName "12345TorstenMahr.OpenWritr" `
 #                            -Publisher "CN=A1B2C3D4-...." `
-#                            [-Version 0.5.2.0]
+#                            [-Version 0.6.0.0]
 #
 # Without -IdentityName/-Publisher it builds with TEST placeholders - fine for
 # local validation (makeappx succeeds, package installs after self-signing),
@@ -20,7 +20,7 @@
 param(
     [string]$IdentityName = "TEST.OpenWritr",
     [string]$Publisher = "CN=TEST",
-    [string]$Version = "0.5.2.0",
+    [string]$Version = "0.6.0.0",
     [switch]$RequireStoreIdentity
 )
 

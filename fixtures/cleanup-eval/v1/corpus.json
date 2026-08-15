@@ -1,0 +1,378 @@
+{
+  "version": "cleanup-eval-corpus-v1",
+  "description": "Privacy-safe, fully synthetic DE/EN source/candidate pairs for the opt-in cleanup_eval evaluator. No real dictation, transcripts, or user content — every entry below was written by hand for this fixture. Do not add real recognized speech to this file.",
+  "cases": [
+    {
+      "id": "punctuation-en-clean",
+      "category": "punctuation",
+      "lang": "en",
+      "notes": "Casing and terminal punctuation restored; the terminal-punctuation warning is expected because the source had none.",
+      "source": "hello can you send me the file",
+      "provider_response": { "content": "Hello, can you send me the file?" },
+      "expect": { "outcome": "enhanced", "text": "Hello, can you send me the file?", "warning_kinds": ["TerminalPunctuationChanged"] }
+    },
+    {
+      "id": "punctuation-de-clean",
+      "category": "punctuation",
+      "lang": "de",
+      "notes": "German casing (noun capitalization) and terminal punctuation restored.",
+      "source": "kannst du mir das dokument schicken",
+      "provider_response": { "content": "Kannst du mir das Dokument schicken?" },
+      "expect": { "outcome": "enhanced", "text": "Kannst du mir das Dokument schicken?", "warning_kinds": ["TerminalPunctuationChanged"] }
+    },
+    {
+      "id": "filler-en-removed",
+      "category": "filler",
+      "lang": "en",
+      "notes": "Fillers 'um'/'uh' fully removed from the candidate.",
+      "source": "um so I think uh we should probably go",
+      "provider_response": { "content": "I think we should probably go." },
+      "expect": { "outcome": "enhanced", "text": "I think we should probably go.", "warning_kinds": ["TerminalPunctuationChanged"] }
+    },
+    {
+      "id": "filler-en-retained",
+      "category": "filler",
+      "lang": "en",
+      "notes": "A poor cleanup that leaves fillers in place; still accepted (warning-only), matching the validator's false-negative bias.",
+      "source": "um I want uh this",
+      "provider_response": { "content": "Um I want uh this." },
+      "expect": { "outcome": "enhanced", "text": "Um I want uh this.", "warning_kinds": ["TerminalPunctuationChanged", "RetainedFiller"] }
+    },
+    {
+      "id": "filler-de-removed",
+      "category": "filler",
+      "lang": "de",
+      "notes": "German fillers 'ähm'/'äh' fully removed.",
+      "source": "also ähm ich denke äh wir sollten los",
+      "provider_response": { "content": "Ich denke, wir sollten los." },
+      "expect": { "outcome": "enhanced", "text": "Ich denke, wir sollten los.", "warning_kinds": ["TerminalPunctuationChanged"] }
+    },
+    {
+      "id": "repetition-en-fixed",
+      "category": "repetition",
+      "lang": "en",
+      "notes": "Adjacent word repetition ('I I', 'we we') collapsed.",
+      "source": "I I think we we should go",
+      "provider_response": { "content": "I think we should go." },
+      "expect": { "outcome": "enhanced", "text": "I think we should go.", "warning_kinds": ["TerminalPunctuationChanged"] }
+    },
+    {
+      "id": "repetition-en-retained",
+      "category": "repetition",
+      "lang": "en",
+      "notes": "A poor cleanup that leaves the duplicated 'I I' in place; still accepted with a warning.",
+      "source": "I I think we we should go",
+      "provider_response": { "content": "I I think we should go." },
+      "expect": { "outcome": "enhanced", "text": "I I think we should go.", "warning_kinds": ["TerminalPunctuationChanged", "AdjacentRepetition"] }
+    },
+    {
+      "id": "repetition-de-fixed",
+      "category": "repetition",
+      "lang": "de",
+      "notes": "German adjacent repetition ('wir wir', 'das das') collapsed.",
+      "source": "wir wir müssen das das prüfen",
+      "provider_response": { "content": "Wir müssen das prüfen." },
+      "expect": { "outcome": "enhanced", "text": "Wir müssen das prüfen.", "warning_kinds": ["TerminalPunctuationChanged"] }
+    },
+    {
+      "id": "negation-en-preserved",
+      "category": "negation",
+      "lang": "en",
+      "notes": "Contraction form of the negation ('cannot' -> \"can't\") preserves the negation count.",
+      "source": "We cannot ship this today",
+      "provider_response": { "content": "We can't ship this today." },
+      "expect": { "outcome": "enhanced", "text": "We can't ship this today.", "warning_kinds": ["TerminalPunctuationChanged"] }
+    },
+    {
+      "id": "negation-en-changed",
+      "category": "negation",
+      "lang": "en",
+      "notes": "Candidate drops 'not', inverting the meaning; the validator rejects in favor of the raw transcript.",
+      "source": "I do not want coffee",
+      "provider_response": { "content": "I want coffee." },
+      "expect": { "outcome": "raw_fallback", "reason": "IntegrityRejected", "error_kinds": ["NegationChanged"], "text": "I do not want coffee" }
+    },
+    {
+      "id": "negation-de-changed",
+      "category": "negation",
+      "lang": "de",
+      "notes": "Candidate drops 'nicht', inverting the meaning.",
+      "source": "Ich habe das Angebot nicht angenommen",
+      "provider_response": { "content": "Ich habe das Angebot angenommen." },
+      "expect": { "outcome": "raw_fallback", "reason": "IntegrityRejected", "error_kinds": ["NegationChanged"], "text": "Ich habe das Angebot nicht angenommen" }
+    },
+    {
+      "id": "negation-de-preserved",
+      "category": "negation",
+      "lang": "de",
+      "notes": "Negation 'nicht' preserved across cleanup.",
+      "source": "Wir können das heute nicht liefern",
+      "provider_response": { "content": "Wir können das heute nicht liefern." },
+      "expect": { "outcome": "enhanced", "text": "Wir können das heute nicht liefern.", "warning_kinds": ["TerminalPunctuationChanged"] }
+    },
+    {
+      "id": "digits-en-rejected",
+      "category": "digits_dates_times_versions",
+      "lang": "en",
+      "notes": "Candidate changes 42 to 24; a factual digit change is always rejected.",
+      "source": "transfer 42 dollars",
+      "provider_response": { "content": "Transfer 24 dollars." },
+      "expect": { "outcome": "raw_fallback", "reason": "IntegrityRejected", "error_kinds": ["FactualDigitChanged"], "text": "transfer 42 dollars" }
+    },
+    {
+      "id": "digits-en-preserved",
+      "category": "digits_dates_times_versions",
+      "lang": "en",
+      "notes": "Digit and version number preserved exactly.",
+      "source": "We need 3 servers running version 2.5 today",
+      "provider_response": { "content": "We need 3 servers running version 2.5 today." },
+      "expect": { "outcome": "enhanced", "text": "We need 3 servers running version 2.5 today.", "warning_kinds": ["TerminalPunctuationChanged"] }
+    },
+    {
+      "id": "digits-en-introduced-warning",
+      "category": "digits_dates_times_versions",
+      "lang": "en",
+      "notes": "Spelling out a number as a digit is only a warning (not a rejection) since nothing existing changed.",
+      "source": "give me five apples",
+      "provider_response": { "content": "Give me 5 apples." },
+      "expect": { "outcome": "enhanced", "text": "Give me 5 apples.", "warning_kinds": ["IntroducedDigit", "TerminalPunctuationChanged"] }
+    },
+    {
+      "id": "digits-de-rejected",
+      "category": "digits_dates_times_versions",
+      "lang": "de",
+      "notes": "German factual digit change (42 -> 24) rejected.",
+      "source": "Bitte überweise 42 euro",
+      "provider_response": { "content": "Bitte überweise 24 Euro." },
+      "expect": { "outcome": "raw_fallback", "reason": "IntegrityRejected", "error_kinds": ["FactualDigitChanged"], "text": "Bitte überweise 42 euro" }
+    },
+    {
+      "id": "digits-de-preserved",
+      "category": "digits_dates_times_versions",
+      "lang": "de",
+      "notes": "German digit and version number preserved.",
+      "source": "Wir brauchen 3 Server mit Version 2.5 heute",
+      "provider_response": { "content": "Wir brauchen 3 Server mit Version 2.5 heute." },
+      "expect": { "outcome": "enhanced", "text": "Wir brauchen 3 Server mit Version 2.5 heute.", "warning_kinds": ["TerminalPunctuationChanged"] }
+    },
+    {
+      "id": "digits-tricky-date-reformat",
+      "category": "digits_dates_times_versions",
+      "tags": ["tricky"],
+      "lang": "de",
+      "notes": "Known tricky case: reformatting '12.03.2024' as '12. März 2024' is semantically identical but changes the digit-token multiset, so the conservative validator rejects it in favor of the raw transcript. This is intentional validator behavior, not a bug — documented here as a regression fixture.",
+      "source": "Termin am 12.03.2024 um 14:30 Uhr",
+      "provider_response": { "content": "Termin ist am 12. März 2024 um 14:30 Uhr." },
+      "expect": { "outcome": "raw_fallback", "reason": "IntegrityRejected", "error_kinds": ["FactualDigitChanged"], "text": "Termin am 12.03.2024 um 14:30 Uhr" }
+    },
+    {
+      "id": "commands-code-acronym-preserved-en",
+      "category": "commands_code_acronyms",
+      "lang": "en",
+      "notes": "Inline code span and acronym both preserved.",
+      "source": "Run `npm install` then restart the API service",
+      "provider_response": { "content": "Run `npm install`, then restart the API service." },
+      "expect": { "outcome": "enhanced", "text": "Run `npm install`, then restart the API service.", "warning_kinds": ["TerminalPunctuationChanged"] }
+    },
+    {
+      "id": "commands-code-acronym-dropped-en",
+      "category": "commands_code_acronyms",
+      "lang": "en",
+      "notes": "Acronym 'API' lowercased to 'api', which the case-sensitive protected-token check treats as dropped.",
+      "source": "Please check the API documentation",
+      "provider_response": { "content": "Please check the api documentation." },
+      "expect": { "outcome": "raw_fallback", "reason": "IntegrityRejected", "error_kinds": ["ProtectedTokenDropped"], "text": "Please check the API documentation" }
+    },
+    {
+      "id": "commands-code-dropped-en",
+      "category": "commands_code_acronyms",
+      "lang": "en",
+      "notes": "Inline code span 'git status' paraphrased away entirely.",
+      "source": "Use `git status` to check changes",
+      "provider_response": { "content": "Use the status command to check changes." },
+      "expect": { "outcome": "raw_fallback", "reason": "IntegrityRejected", "error_kinds": ["ProtectedTokenDropped"], "text": "Use `git status` to check changes" }
+    },
+    {
+      "id": "commands-code-acronym-arrayparts-en",
+      "category": "commands_code_acronyms",
+      "lang": "en",
+      "notes": "Exercises the content-parts (array-of-strings) provider response shape via adapter::parse_chat_response; acronym 'ETA' preserved.",
+      "source": "Please confirm the ETA for delivery",
+      "provider_response": { "content_parts": ["Please confirm the ", "ETA", " for delivery."] },
+      "expect": { "outcome": "enhanced", "text": "Please confirm the ETA for delivery.", "warning_kinds": ["TerminalPunctuationChanged"] }
+    },
+    {
+      "id": "urls-preserved-en",
+      "category": "urls_emails",
+      "lang": "en",
+      "notes": "URL preserved exactly.",
+      "source": "Please review the doc at https://example.com/guide and reply",
+      "provider_response": { "content": "Please review the doc at https://example.com/guide and reply." },
+      "expect": { "outcome": "enhanced", "text": "Please review the doc at https://example.com/guide and reply.", "warning_kinds": ["TerminalPunctuationChanged"] }
+    },
+    {
+      "id": "urls-dropped-en",
+      "category": "urls_emails",
+      "lang": "en",
+      "notes": "URL dropped from the candidate entirely.",
+      "source": "See https://example.com/policy for details",
+      "provider_response": { "content": "See the policy page for details." },
+      "expect": { "outcome": "raw_fallback", "reason": "IntegrityRejected", "error_kinds": ["ProtectedTokenDropped"], "text": "See https://example.com/policy for details" }
+    },
+    {
+      "id": "emails-preserved-en",
+      "category": "urls_emails",
+      "lang": "en",
+      "notes": "Email address preserved exactly.",
+      "source": "Contact alice@example.com for access",
+      "provider_response": { "content": "Contact alice@example.com for access." },
+      "expect": { "outcome": "enhanced", "text": "Contact alice@example.com for access.", "warning_kinds": ["TerminalPunctuationChanged"] }
+    },
+    {
+      "id": "emails-dropped-en",
+      "category": "urls_emails",
+      "lang": "en",
+      "notes": "Email address dropped from the candidate entirely.",
+      "source": "Email bob@example.org with questions",
+      "provider_response": { "content": "Send your questions by email." },
+      "expect": { "outcome": "raw_fallback", "reason": "IntegrityRejected", "error_kinds": ["ProtectedTokenDropped"], "text": "Email bob@example.org with questions" }
+    },
+    {
+      "id": "urls-de-preserved",
+      "category": "urls_emails",
+      "lang": "de",
+      "notes": "German sentence, URL preserved exactly.",
+      "source": "Öffne bitte https://example.com/handbuch für Details",
+      "provider_response": { "content": "Öffne bitte https://example.com/handbuch für Details." },
+      "expect": { "outcome": "enhanced", "text": "Öffne bitte https://example.com/handbuch für Details.", "warning_kinds": ["TerminalPunctuationChanged"] }
+    },
+    {
+      "id": "language-preservation-en",
+      "category": "language_preservation",
+      "lang": "en",
+      "notes": "Long enough for confident language detection on both sides; language stays English throughout.",
+      "source": "So I think that we should probably wait for the client to confirm before we proceed",
+      "provider_response": { "content": "I think we should wait for the client to confirm before we proceed." },
+      "expect": { "outcome": "enhanced", "text": "I think we should wait for the client to confirm before we proceed.", "warning_kinds": ["TerminalPunctuationChanged"] }
+    },
+    {
+      "id": "language-preservation-de",
+      "category": "language_preservation",
+      "lang": "de",
+      "notes": "Long enough for confident language detection on both sides; language stays German throughout.",
+      "source": "Wir sollten das Angebot nach der Prüfung noch einmal besprechen",
+      "provider_response": { "content": "Wir sollten das Angebot nach der Prüfung noch einmal besprechen." },
+      "expect": { "outcome": "enhanced", "text": "Wir sollten das Angebot nach der Prüfung noch einmal besprechen.", "warning_kinds": ["TerminalPunctuationChanged"] }
+    },
+    {
+      "id": "language-drift-de-to-en",
+      "category": "language_preservation",
+      "tags": ["tricky"],
+      "lang": "de",
+      "notes": "Candidate switches confidently from German to English; rejected as language drift even though the negation count happens to match.",
+      "source": "Der Kunde hat das Angebot noch nicht bestätigt",
+      "provider_response": { "content": "The customer has not yet confirmed the offer." },
+      "expect": { "outcome": "raw_fallback", "reason": "IntegrityRejected", "error_kinds": ["LanguageDrift"], "text": "Der Kunde hat das Angebot noch nicht bestätigt" }
+    },
+    {
+      "id": "filler-only-whitespace-empty",
+      "category": "filler_only_empty",
+      "lang": "en",
+      "notes": "Whitespace/ellipsis-only source has no alphanumeric content, so the model's [[EMPTY]] sentinel is accepted as a genuinely empty (not fallback) result.",
+      "source": "...",
+      "provider_response": { "content": "[[EMPTY]]" },
+      "expect": { "outcome": "enhanced", "text": "" }
+    },
+    {
+      "id": "filler-only-hesitation-en-accepted",
+      "category": "filler_only_empty",
+      "lang": "en",
+      "notes": "English hesitation-only speech ('um uh erm') carries no meaningful content, so the model's [[EMPTY]] sentinel is accepted as a genuinely empty (not fallback) result.",
+      "source": "um uh erm",
+      "provider_response": { "content": "[[EMPTY]]" },
+      "expect": { "outcome": "enhanced", "text": "" }
+    },
+    {
+      "id": "filler-only-hesitation-de-accepted",
+      "category": "filler_only_empty",
+      "lang": "de",
+      "notes": "German hesitation-only speech ('ähm äh hm') carries no meaningful content, so the model's [[EMPTY]] sentinel is accepted as a genuinely empty (not fallback) result.",
+      "source": "ähm äh hm",
+      "provider_response": { "content": "[[EMPTY]]" },
+      "expect": { "outcome": "enhanced", "text": "" }
+    },
+    {
+      "id": "filler-only-meaningful-source-en-rawfallback",
+      "category": "filler_only_empty",
+      "lang": "en",
+      "notes": "The source has real content, so an [[EMPTY]] sentinel — whether a genuine model decision or a malicious/accidental one — is rejected in favor of the raw transcript rather than silently erasing meaningful speech.",
+      "source": "please call me back",
+      "provider_response": { "content": "[[EMPTY]]" },
+      "expect": { "outcome": "raw_fallback", "reason": "EmptyCandidate", "text": "please call me back" }
+    },
+    {
+      "id": "filler-only-meaningful-source-de-rawfallback",
+      "category": "filler_only_empty",
+      "lang": "de",
+      "notes": "German equivalent: the source has real content, so the [[EMPTY]] sentinel is rejected in favor of the raw transcript.",
+      "source": "bitte ruf mich zurück",
+      "provider_response": { "content": "[[EMPTY]]" },
+      "expect": { "outcome": "raw_fallback", "reason": "EmptyCandidate", "text": "bitte ruf mich zurück" }
+    },
+    {
+      "id": "filler-only-arbitrary-blank-output-rawfallback",
+      "category": "filler_only_empty",
+      "tags": ["tricky"],
+      "lang": "en",
+      "notes": "Known tricky case: an arbitrary blank candidate (not the explicit [[EMPTY]] sentinel) is never treated as a deliberate empty signal, even when the source itself is filler-only. This is intentional — only the exact sentinel opts into the empty-result path.",
+      "source": "um uh",
+      "provider_response": { "content": "" },
+      "expect": { "outcome": "raw_fallback", "reason": "EmptyCandidate", "text": "um uh" }
+    },
+    {
+      "id": "tricky-acronym-stoplist-ok",
+      "category": "tricky",
+      "lang": "en",
+      "notes": "The acronym stoplist (OK/TV/PM/AM) is deliberately not protected, so dropping 'OK' is safe while the real acronym 'API' still must survive.",
+      "source": "OK let's proceed with the API deployment",
+      "provider_response": { "content": "Let's proceed with the API deployment." },
+      "expect": { "outcome": "enhanced", "text": "Let's proceed with the API deployment.", "warning_kinds": ["TerminalPunctuationChanged"] }
+    },
+    {
+      "id": "tricky-oversized-input-validator-error",
+      "category": "tricky",
+      "lang": "en",
+      "notes": "Source exceeds integrity::MAX_INPUT_CHARS; the validator refuses to run and the pipeline falls back to the raw (oversized) transcript rather than guessing. Source is generated at run time from source_repeat to keep the corpus file small.",
+      "source_repeat": { "char": "a", "count": 100001 },
+      "provider_response": { "content": "cleaned output" },
+      "expect": { "outcome": "raw_fallback", "reason": "ValidatorError", "text_equals_source": true }
+    },
+    {
+      "id": "tricky-malformed-response-parse-error",
+      "category": "tricky",
+      "lang": "en",
+      "notes": "Simulated provider response missing choices[0].message.content entirely; parsing fails before the integrity validator ever runs.",
+      "source": "Please clean this up",
+      "provider_response": { "raw": {} },
+      "expect": { "outcome": "parse_error", "parse_error": "MissingContent" }
+    },
+    {
+      "id": "tricky-content-array-no-text",
+      "category": "tricky",
+      "lang": "en",
+      "notes": "Simulated provider response with a content-parts array that has no text parts (e.g. only an image reference).",
+      "source": "Please clean this up",
+      "provider_response": { "raw": { "choices": [ { "message": { "content": [ { "type": "image_url", "image_url": { "url": "x" } } ] } } ] } },
+      "expect": { "outcome": "parse_error", "parse_error": "NoTextContent" }
+    },
+    {
+      "id": "tricky-unsupported-content-shape",
+      "category": "tricky",
+      "lang": "en",
+      "notes": "Simulated provider response where content is a bare number, an unsupported shape.",
+      "source": "Please clean this up",
+      "provider_response": { "raw": { "choices": [ { "message": { "content": 42 } } ] } },
+      "expect": { "outcome": "parse_error", "parse_error": "UnsupportedContentShape" }
+    }
+  ]
+}

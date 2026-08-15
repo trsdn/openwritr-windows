@@ -1,21 +1,61 @@
 use crate::asr::{self, Engine};
+use crate::cleanup::{EnhanceOutcome, FallbackReason};
 use crate::enhance;
 use crate::model_manager::{CancellationToken, ModelManager, ModelState};
 use crate::settings::Settings;
 use anyhow::{anyhow, Context, Result};
 use parking_lot::Mutex;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::Arc;
 use std::thread;
 use std::time::Instant;
-use tracing::{info, warn};
+use tracing::info;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ShutdownMode {
     Wait,
     Discard,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RecordingIntent {
+    Raw,
+    Enhance,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DeliveryTarget {
+    pub hwnd: isize,
+    pub process_id: u32,
+    pub process_creation_time_100ns: Option<u64>,
+}
+
+#[derive(Clone, Debug)]
+pub struct JobConfig {
+    settings: Settings,
+    intent: RecordingIntent,
+    delivery_target: Option<DeliveryTarget>,
+}
+
+impl JobConfig {
+    pub fn new(
+        settings: Settings,
+        intent: RecordingIntent,
+        delivery_target: Option<DeliveryTarget>,
+        _enhancement_disabled: bool,
+    ) -> Self {
+        Self {
+            settings,
+            intent,
+            delivery_target,
+        }
+    }
+
+    fn should_enhance(&self) -> bool {
+        self.intent == RecordingIntent::Enhance && self.settings.enhance.mode.is_enabled()
+    }
 }
 
 pub enum WorkerEvent {
@@ -41,11 +81,15 @@ pub enum WorkerEvent {
     JobStarted {
         id: u64,
     },
+    EnhancementStarted {
+        id: u64,
+    },
     JobCompleted {
         id: u64,
         text: String,
         auto_paste: bool,
-        enhancement_warning: Option<String>,
+        enhancement_warning: Option<FallbackReason>,
+        delivery_target: Option<DeliveryTarget>,
     },
     JobFailed {
         id: u64,
@@ -62,8 +106,7 @@ struct Job {
     generation: u64,
     samples: Vec<f32>,
     sample_rate: u32,
-    enhance_requested: bool,
-    settings: Settings,
+    config: JobConfig,
 }
 
 enum Command {
@@ -123,6 +166,8 @@ pub struct Worker {
     shutdown_requested: Arc<AtomicBool>,
     discard_requested: Arc<AtomicBool>,
     pending_jobs_by_generation: Arc<Mutex<HashMap<u64, usize>>>,
+    job_events: Mutex<JobEventTracker>,
+    synthetic_events: Mutex<VecDeque<WorkerEvent>>,
     transition_gate: Arc<Mutex<()>>,
     next_generation: u64,
     next_job: u64,
@@ -172,6 +217,8 @@ impl Worker {
             shutdown_requested,
             discard_requested,
             pending_jobs_by_generation,
+            job_events: Mutex::new(JobEventTracker::default()),
+            synthetic_events: Mutex::new(VecDeque::new()),
             transition_gate,
             next_generation: 1,
             next_job: 1,
@@ -228,8 +275,7 @@ impl Worker {
         &mut self,
         samples: Vec<f32>,
         sample_rate: u32,
-        enhance_requested: bool,
-        settings: Settings,
+        config: JobConfig,
     ) -> Result<u64> {
         if self.shutdown_requested.load(Ordering::Acquire) {
             return Err(anyhow!("inference worker is shutting down"));
@@ -238,15 +284,16 @@ impl Worker {
         self.next_job = self.next_job.saturating_add(1);
         let generation = self.latest_generation.load(Ordering::Acquire);
         register_pending_job(&self.pending_jobs_by_generation, generation);
+        self.job_events.lock().register(id);
         if let Err(error) = self.command_tx.send(Command::Transcribe(Job {
             id,
             generation,
             samples,
             sample_rate,
-            enhance_requested,
-            settings,
+            config,
         })) {
             unregister_pending_job(&self.pending_jobs_by_generation, generation);
+            self.job_events.lock().forget(id);
             return Err(anyhow!("send transcription job: {error}"));
         }
         Ok(id)
@@ -254,6 +301,14 @@ impl Worker {
 
     pub fn shutdown(&self, mode: ShutdownMode) -> Result<()> {
         let _transition = self.transition_gate.lock();
+        if mode == ShutdownMode::Discard {
+            let discarded = self.job_events.lock().tombstone_all();
+            self.synthetic_events.lock().extend(
+                discarded
+                    .into_iter()
+                    .map(|id| WorkerEvent::JobDiscarded { id }),
+            );
+        }
         self.shutdown_requested.store(true, Ordering::Release);
         if mode == ShutdownMode::Discard {
             self.discard_requested.store(true, Ordering::Release);
@@ -271,29 +326,163 @@ impl Worker {
     }
 
     pub fn try_recv(&self) -> Option<WorkerEvent> {
-        match self.event_rx.try_recv() {
-            Ok(event) => Some(self.normalize_event(event)),
-            Err(TryRecvError::Empty | TryRecvError::Disconnected) => None,
+        loop {
+            if let Some(event) = self.synthetic_events.lock().pop_front() {
+                return Some(event);
+            }
+            match self.event_rx.try_recv() {
+                Ok(event) => {
+                    if let Some(event) = self.normalize_event(event) {
+                        return Some(event);
+                    }
+                }
+                Err(TryRecvError::Empty | TryRecvError::Disconnected) => return None,
+            }
         }
     }
 
     #[cfg(test)]
     fn recv_timeout(&self, timeout: std::time::Duration) -> Option<WorkerEvent> {
-        self.event_rx
-            .recv_timeout(timeout)
-            .ok()
-            .map(|event| self.normalize_event(event))
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            if let Some(event) = self.synthetic_events.lock().pop_front() {
+                return Some(event);
+            }
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            let event = self.event_rx.recv_timeout(remaining).ok()?;
+            if let Some(event) = self.normalize_event(event) {
+                return Some(event);
+            }
+        }
     }
 
-    fn normalize_event(&self, event: WorkerEvent) -> WorkerEvent {
-        if !self.discard_requested.load(Ordering::Acquire) {
-            return event;
+    fn normalize_event(&self, event: WorkerEvent) -> Option<WorkerEvent> {
+        self.job_events
+            .lock()
+            .normalize(event, self.discard_requested.load(Ordering::Acquire))
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum JobPhase {
+    Queued,
+    Transcribing,
+    Enhancing,
+}
+
+#[derive(Default)]
+struct JobEventTracker {
+    phases: HashMap<u64, JobPhase>,
+    tombstones: HashSet<u64>,
+    tombstone_order: VecDeque<u64>,
+}
+
+impl JobEventTracker {
+    fn register(&mut self, id: u64) {
+        self.tombstones.remove(&id);
+        self.phases.insert(id, JobPhase::Queued);
+    }
+
+    fn forget(&mut self, id: u64) {
+        self.phases.remove(&id);
+        self.tombstones.remove(&id);
+    }
+
+    fn finish(&mut self, id: u64) -> bool {
+        if self.phases.remove(&id).is_some() {
+            self.add_tombstone(id);
+            true
+        } else {
+            false
         }
-        match event {
-            WorkerEvent::JobCompleted { id, .. } | WorkerEvent::JobFailed { id, .. } => {
-                WorkerEvent::JobDiscarded { id }
+    }
+
+    fn add_tombstone(&mut self, id: u64) {
+        const TOMBSTONE_LIMIT: usize = 1024;
+        if self.tombstones.insert(id) {
+            self.tombstone_order.push_back(id);
+        }
+        while self.tombstone_order.len() > TOMBSTONE_LIMIT {
+            if let Some(expired) = self.tombstone_order.pop_front() {
+                self.tombstones.remove(&expired);
             }
-            other => other,
+        }
+    }
+
+    fn tombstone_all(&mut self) -> Vec<u64> {
+        let mut ids = self.phases.drain().map(|(id, _)| id).collect::<Vec<_>>();
+        ids.sort_unstable();
+        for id in &ids {
+            self.add_tombstone(*id);
+        }
+        ids
+    }
+
+    fn normalize(&mut self, event: WorkerEvent, discard_requested: bool) -> Option<WorkerEvent> {
+        if Self::event_job_id(&event).is_some_and(|id| self.tombstones.contains(&id)) {
+            return None;
+        }
+        let event = if discard_requested {
+            match event {
+                WorkerEvent::JobCompleted { id, .. } | WorkerEvent::JobFailed { id, .. } => {
+                    WorkerEvent::JobDiscarded { id }
+                }
+                WorkerEvent::JobStarted { .. } | WorkerEvent::EnhancementStarted { .. } => {
+                    return None;
+                }
+                other => other,
+            }
+        } else {
+            event
+        };
+
+        match event {
+            WorkerEvent::JobStarted { id } => {
+                let phase = self.phases.get_mut(&id)?;
+                if *phase != JobPhase::Queued {
+                    return None;
+                }
+                *phase = JobPhase::Transcribing;
+                Some(WorkerEvent::JobStarted { id })
+            }
+            WorkerEvent::EnhancementStarted { id } => {
+                let phase = self.phases.get_mut(&id)?;
+                if *phase != JobPhase::Transcribing {
+                    return None;
+                }
+                *phase = JobPhase::Enhancing;
+                Some(WorkerEvent::EnhancementStarted { id })
+            }
+            event @ WorkerEvent::JobCompleted { id, .. } => {
+                if !matches!(
+                    self.phases.get(&id),
+                    Some(JobPhase::Transcribing | JobPhase::Enhancing)
+                ) {
+                    return None;
+                }
+                self.finish(id).then_some(event)
+            }
+            event @ WorkerEvent::JobFailed { id, .. }
+            | event @ WorkerEvent::JobDiscarded { id } => self.finish(id).then_some(event),
+            WorkerEvent::ShutdownComplete => {
+                let unfinished = self.phases.drain().map(|(id, _)| id).collect::<Vec<_>>();
+                for id in unfinished {
+                    self.add_tombstone(id);
+                }
+                Some(WorkerEvent::ShutdownComplete)
+            }
+            other => Some(other),
+        }
+    }
+
+    fn event_job_id(event: &WorkerEvent) -> Option<u64> {
+        match event {
+            WorkerEvent::JobStarted { id }
+            | WorkerEvent::EnhancementStarted { id }
+            | WorkerEvent::JobCompleted { id, .. }
+            | WorkerEvent::JobFailed { id, .. }
+            | WorkerEvent::JobDiscarded { id } => Some(*id),
+            _ => None,
         }
     }
 }
@@ -437,20 +626,26 @@ fn worker_main(
                     }
                 }
 
-                let (final_text, enhancement_warning) =
-                    if job.enhance_requested && job.settings.enhance.mode.is_enabled() {
-                        info!("enhancement requested");
-                        match enhance::enhance(&text, &job.settings) {
-                            Ok(enhanced) if !enhanced.trim().is_empty() => (enhanced, None),
-                            Ok(_) => (text, None),
-                            Err(error) => {
-                                warn!(error = %error, "enhance failed; using raw transcript");
-                                (text, Some(error.to_string()))
-                            }
+                let (final_text, enhancement_warning) = if job.config.should_enhance() {
+                    let _ = event_tx.send(WorkerEvent::EnhancementStarted { id: job.id });
+                    info!("enhancement requested");
+                    let outcome = enhance::enhance_outcome(&text, &job.config.settings, || {
+                        interrupted_job_event(job.id, &discard_requested, &engine_cancellation)
+                            .is_none()
+                    });
+                    let Some(outcome) = outcome else {
+                        let _transition = transition_gate.lock();
+                        if let Some(event) =
+                            interrupted_job_event(job.id, &discard_requested, &engine_cancellation)
+                        {
+                            let _ = event_tx.send(event);
                         }
-                    } else {
-                        (text, None)
+                        continue;
                     };
+                    completed_cleanup(outcome)
+                } else {
+                    (text, None)
+                };
 
                 let chars = final_text.chars().count();
                 let elapsed_ms = started.elapsed().as_millis() as u64;
@@ -460,8 +655,9 @@ fn worker_main(
                         WorkerEvent::JobCompleted {
                             id: job.id,
                             text: final_text,
-                            auto_paste: job.settings.auto_paste,
+                            auto_paste: job.config.settings.auto_paste,
                             enhancement_warning,
+                            delivery_target: job.config.delivery_target,
                         }
                     });
                 if matches!(&event, WorkerEvent::JobCompleted { .. }) {
@@ -476,6 +672,15 @@ fn worker_main(
                 break;
             }
         }
+    }
+}
+
+fn completed_cleanup(outcome: EnhanceOutcome) -> (String, Option<FallbackReason>) {
+    match outcome {
+        EnhanceOutcome::Enhanced { text, .. } | EnhanceOutcome::Skipped { text, .. } => {
+            (text, None)
+        }
+        EnhanceOutcome::RawFallback { text, reason } => (text, Some(reason)),
     }
 }
 
@@ -699,6 +904,10 @@ mod tests {
         });
     }
 
+    fn job_config(settings: Settings, intent: RecordingIntent) -> JobConfig {
+        JobConfig::new(settings, intent, None, false)
+    }
+
     #[test]
     fn stale_engine_load_is_never_published() {
         let (mut worker, _, _, _) = worker(&[], Some("slow"));
@@ -743,9 +952,19 @@ mod tests {
         wait_ready(&worker, "ready");
         let settings = Settings::default();
         let first = worker
-            .enqueue(vec![1.0], 16_000, false, settings.clone())
+            .enqueue(
+                vec![1.0],
+                16_000,
+                job_config(settings.clone(), RecordingIntent::Raw),
+            )
             .unwrap();
-        let second = worker.enqueue(vec![2.0], 16_000, false, settings).unwrap();
+        let second = worker
+            .enqueue(
+                vec![2.0],
+                16_000,
+                job_config(settings, RecordingIntent::Raw),
+            )
+            .unwrap();
 
         let events = wait_until(
             &worker,
@@ -765,6 +984,70 @@ mod tests {
     }
 
     #[test]
+    fn delivery_target_metadata_is_carried_to_completion() {
+        let (mut worker, _, _, _) = worker(&[], None);
+        worker.load("ready".into()).unwrap();
+        wait_ready(&worker, "ready");
+        let target = DeliveryTarget {
+            hwnd: 17,
+            process_id: 23,
+            process_creation_time_100ns: Some(42),
+        };
+        let job = worker
+            .enqueue(
+                vec![1.0],
+                16_000,
+                JobConfig::new(
+                    Settings::default(),
+                    RecordingIntent::Raw,
+                    Some(target),
+                    false,
+                ),
+            )
+            .unwrap();
+
+        let events = wait_until(
+            &worker,
+            |event| matches!(event, WorkerEvent::JobCompleted { id, .. } if *id == job),
+        );
+        let completed_target = events.into_iter().find_map(|event| match event {
+            WorkerEvent::JobCompleted {
+                delivery_target, ..
+            } => Some(delivery_target),
+            _ => None,
+        });
+
+        assert_eq!(completed_target, Some(Some(target)));
+    }
+
+    #[test]
+    fn job_snapshot_drives_provider_model_endpoint_and_prompt_resolution() {
+        let mut live = Settings::default();
+        live.enhance.mode = crate::settings::EnhanceMode::Always;
+        live.enhance.provider = "openai_compatible".into();
+        live.enhance.base_url = "https://snapshot.example/v1/".into();
+        live.enhance.model = "private-deployment-42".into();
+        let target = live.prompt_target().unwrap();
+        live.prompt_overrides
+            .set(target, "Use the frozen prompt.".into());
+
+        let config = JobConfig::new(live.clone(), RecordingIntent::Enhance, None, false);
+        live.enhance.provider = "github_copilot".into();
+        live.enhance.base_url = "https://changed.example/v1".into();
+        live.enhance.model = "changed-model".into();
+
+        let prepared =
+            crate::enhance::prepare_cleanup_request("raw transcript", &config.settings).unwrap();
+        assert_eq!(prepared.url, "https://snapshot.example/v1/chat/completions");
+        assert_eq!(prepared.body["model"], "private-deployment-42");
+        let messages = prepared.body["messages"].as_array().unwrap();
+        assert_eq!(messages[0]["role"], "system");
+        assert_eq!(messages[0]["content"], "Use the frozen prompt.");
+        assert_eq!(messages[1]["role"], "user");
+        assert_eq!(messages[1]["content"], "raw transcript");
+    }
+
+    #[test]
     fn enhancement_failure_returns_the_raw_transcript_with_a_warning() {
         let (mut worker, _, _, _) = worker(&[], None);
         worker.load("ready".into()).unwrap();
@@ -772,7 +1055,13 @@ mod tests {
         let mut settings = Settings::default();
         settings.enhance.mode = crate::settings::EnhanceMode::Always;
         settings.enhance.provider = "invalid-provider".into();
-        let job = worker.enqueue(vec![7.0], 16_000, true, settings).unwrap();
+        let job = worker
+            .enqueue(
+                vec![7.0],
+                16_000,
+                job_config(settings, RecordingIntent::Enhance),
+            )
+            .unwrap();
 
         let events = wait_until(
             &worker,
@@ -789,7 +1078,95 @@ mod tests {
 
         let (text, warning) = completed.unwrap();
         assert_eq!(text, "7");
-        assert!(warning.unwrap().contains("unknown provider"));
+        assert_eq!(warning, Some(FallbackReason::UnknownProvider));
+    }
+
+    #[test]
+    fn validator_rejection_is_a_typed_raw_fallback_for_the_worker() {
+        let outcome =
+            crate::cleanup::pipeline::finalize("transfer 42 dollars", "Transfer 24 dollars.");
+        let (text, warning) = completed_cleanup(outcome);
+        assert_eq!(text, "transfer 42 dollars");
+        assert!(matches!(
+            warning,
+            Some(FallbackReason::IntegrityRejected(_))
+        ));
+    }
+
+    #[test]
+    fn enhancement_phase_is_published_before_completion() {
+        let (mut worker, _, _, _) = worker(&[], None);
+        worker.load("ready".into()).unwrap();
+        wait_ready(&worker, "ready");
+        let mut settings = Settings::default();
+        settings.enhance.mode = crate::settings::EnhanceMode::Always;
+        settings.enhance.provider = "invalid-provider".into();
+        let job = worker
+            .enqueue(
+                vec![7.0],
+                16_000,
+                job_config(settings, RecordingIntent::Enhance),
+            )
+            .unwrap();
+
+        let events = wait_until(
+            &worker,
+            |event| matches!(event, WorkerEvent::JobCompleted { id, .. } if *id == job),
+        );
+        let phases = events
+            .iter()
+            .filter_map(|event| match event {
+                WorkerEvent::JobStarted { id } if *id == job => Some("transcribing"),
+                WorkerEvent::EnhancementStarted { id } if *id == job => Some("enhancing"),
+                WorkerEvent::JobCompleted { id, .. } if *id == job => Some("completed"),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(phases, ["transcribing", "enhancing", "completed"]);
+    }
+
+    #[test]
+    fn job_tombstones_suppress_late_and_backward_events() {
+        let mut tracker = JobEventTracker::default();
+        tracker.register(41);
+
+        assert!(matches!(
+            tracker.normalize(WorkerEvent::JobStarted { id: 41 }, false),
+            Some(WorkerEvent::JobStarted { id: 41 })
+        ));
+        assert!(matches!(
+            tracker.normalize(WorkerEvent::EnhancementStarted { id: 41 }, false),
+            Some(WorkerEvent::EnhancementStarted { id: 41 })
+        ));
+        assert!(matches!(
+            tracker.normalize(
+                WorkerEvent::JobCompleted {
+                    id: 41,
+                    text: "done".into(),
+                    auto_paste: true,
+                    enhancement_warning: None,
+                    delivery_target: None,
+                },
+                false,
+            ),
+            Some(WorkerEvent::JobCompleted { id: 41, .. })
+        ));
+        assert!(tracker
+            .normalize(WorkerEvent::EnhancementStarted { id: 41 }, false)
+            .is_none());
+        assert!(tracker
+            .normalize(
+                WorkerEvent::JobCompleted {
+                    id: 41,
+                    text: "late".into(),
+                    auto_paste: true,
+                    enhancement_warning: None,
+                    delivery_target: None,
+                },
+                false,
+            )
+            .is_none());
     }
 
     #[test]
@@ -799,9 +1176,19 @@ mod tests {
         wait_ready(&worker, "ready");
         let settings = Settings::default();
         worker
-            .enqueue(vec![1.0], 16_000, false, settings.clone())
+            .enqueue(
+                vec![1.0],
+                16_000,
+                job_config(settings.clone(), RecordingIntent::Raw),
+            )
             .unwrap();
-        worker.enqueue(vec![2.0], 16_000, false, settings).unwrap();
+        worker
+            .enqueue(
+                vec![2.0],
+                16_000,
+                job_config(settings, RecordingIntent::Raw),
+            )
+            .unwrap();
         worker.shutdown(ShutdownMode::Wait).unwrap();
 
         let events = wait_until(&worker, |event| {
@@ -822,7 +1209,11 @@ mod tests {
         worker.load("ready".into()).unwrap();
         wait_ready(&worker, "ready");
         let job = worker
-            .enqueue(vec![1.0], 16_000, false, Settings::default())
+            .enqueue(
+                vec![1.0],
+                16_000,
+                job_config(Settings::default(), RecordingIntent::Raw),
+            )
             .unwrap();
         wait_until(
             &worker,
@@ -849,7 +1240,11 @@ mod tests {
         wait_ready(&worker, "ready");
         worker.load("required".into()).unwrap();
         let job = worker
-            .enqueue(vec![2.0], 16_000, false, Settings::default())
+            .enqueue(
+                vec![2.0],
+                16_000,
+                job_config(Settings::default(), RecordingIntent::Raw),
+            )
             .unwrap();
         worker.shutdown(ShutdownMode::Wait).unwrap();
 
@@ -871,7 +1266,11 @@ mod tests {
         wait_ready(&worker, "ready");
         worker.load("required".into()).unwrap();
         let job = worker
-            .enqueue(vec![2.0], 16_000, false, Settings::default())
+            .enqueue(
+                vec![2.0],
+                16_000,
+                job_config(Settings::default(), RecordingIntent::Raw),
+            )
             .unwrap();
         worker.load("latest".into()).unwrap();
 
@@ -894,7 +1293,11 @@ mod tests {
         wait_ready(&worker, "ready");
         worker.load("cancelled".into()).unwrap();
         let job = worker
-            .enqueue(vec![2.0], 16_000, false, Settings::default())
+            .enqueue(
+                vec![2.0],
+                16_000,
+                job_config(Settings::default(), RecordingIntent::Raw),
+            )
             .unwrap();
         worker.cancel_load();
 
@@ -914,7 +1317,11 @@ mod tests {
         worker.load("ready".into()).unwrap();
         wait_ready(&worker, "ready");
         let job = worker
-            .enqueue(vec![2.0], 16_000, false, Settings::default())
+            .enqueue(
+                vec![2.0],
+                16_000,
+                job_config(Settings::default(), RecordingIntent::Raw),
+            )
             .unwrap();
         wait_until(
             &worker,
@@ -938,7 +1345,11 @@ mod tests {
         worker.load("ready".into()).unwrap();
         wait_ready(&worker, "ready");
         let job = worker
-            .enqueue(vec![2.0], 16_000, false, Settings::default())
+            .enqueue(
+                vec![2.0],
+                16_000,
+                job_config(Settings::default(), RecordingIntent::Raw),
+            )
             .unwrap();
         thread::sleep(Duration::from_millis(150));
         worker.shutdown(ShutdownMode::Discard).unwrap();
@@ -962,9 +1373,19 @@ mod tests {
         wait_ready(&worker, "ready");
         let settings = Settings::default();
         let first = worker
-            .enqueue(vec![1.0], 16_000, false, settings.clone())
+            .enqueue(
+                vec![1.0],
+                16_000,
+                job_config(settings.clone(), RecordingIntent::Raw),
+            )
             .unwrap();
-        let second = worker.enqueue(vec![2.0], 16_000, false, settings).unwrap();
+        let second = worker
+            .enqueue(
+                vec![2.0],
+                16_000,
+                job_config(settings, RecordingIntent::Raw),
+            )
+            .unwrap();
         wait_until(
             &worker,
             |event| matches!(event, WorkerEvent::JobStarted { id } if *id == first),

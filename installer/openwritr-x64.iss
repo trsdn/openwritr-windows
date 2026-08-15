@@ -8,7 +8,7 @@
 
 #define AppName       "OpenWritr"
 #ifndef AppVersion
-#define AppVersion    "0.5.2"
+#define AppVersion    "0.6.0"
 #endif
 #define AppPublisher  "Torsten Mahr"
 #define AppURL        "https://github.com/trsdn/openwritr-windows"

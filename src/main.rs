@@ -6,6 +6,7 @@ mod about;
 mod app;
 mod asr;
 mod audio;
+mod cleanup;
 mod credentials;
 mod diagnostics;
 mod enhance;

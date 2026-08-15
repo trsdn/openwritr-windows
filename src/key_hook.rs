@@ -210,6 +210,19 @@ pub fn is_down(vk: u32) -> bool {
     }
 }
 
+pub fn shift_is_down() -> bool {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{VK_LSHIFT, VK_RSHIFT, VK_SHIFT};
+    any_shift_down(
+        is_down(VK_LSHIFT.0 as u32),
+        is_down(VK_RSHIFT.0 as u32),
+        is_down(VK_SHIFT.0 as u32),
+    )
+}
+
+fn any_shift_down(left: bool, right: bool, generic: bool) -> bool {
+    left || right || generic
+}
+
 pub fn request_reinstall() {
     clear_held_state();
     REINSTALL_REQUESTED.store(true, Ordering::Release);
@@ -296,7 +309,7 @@ impl HealthMonitor {
 
 #[cfg(test)]
 mod tests {
-    use super::HealthMonitor;
+    use super::{any_shift_down, HealthMonitor};
     use std::collections::HashMap;
     use std::time::{Duration, Instant};
 
@@ -352,5 +365,14 @@ mod tests {
         assert!(!monitor.observe(start + Duration::from_secs(2), |_| secondary, |_| true,));
         secondary = false;
         assert!(!monitor.observe(start + Duration::from_secs(3), |_| secondary, |_| true,));
+    }
+
+    #[test]
+    fn shift_sampling_accepts_left_right_or_generic_state() {
+        assert!(!any_shift_down(false, false, false));
+        assert!(any_shift_down(true, false, false));
+        assert!(any_shift_down(false, true, false));
+        assert!(any_shift_down(false, false, true));
+        assert!(any_shift_down(true, true, true));
     }
 }
