@@ -15,6 +15,7 @@ use tracing::{info, warn};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Event {
     Press { shift_down: bool },
+    ShiftChanged { shift_down: bool },
     Release,
 }
 
@@ -171,12 +172,21 @@ pub fn configured_key_down(vk: u32) -> bool {
     }
 }
 
-/// State carried between successive `poll_combo` calls. Just a boolean —
-/// the low-level keyboard hook in `key_hook` already gives us reliable
-/// physical state across focus changes, so no debounce is needed.
-#[derive(Default)]
+/// State carried between successive `poll_combo` calls. The low-level
+/// keyboard hook in `key_hook` gives us reliable physical state across focus
+/// changes, so no debounce is needed for either combo or Shift transitions.
 pub struct PollState {
     pub pressed: bool,
+    shift_down: bool,
+}
+
+impl Default for PollState {
+    fn default() -> Self {
+        Self {
+            pressed: false,
+            shift_down: false,
+        }
+    }
 }
 
 /// Clear a poll state before replacing it. If the old shortcut was held,
@@ -184,6 +194,7 @@ pub struct PollState {
 pub fn release_before_reset(state: &mut PollState) -> Option<Event> {
     if state.pressed {
         state.pressed = false;
+        state.shift_down = false;
         Some(Event::Release)
     } else {
         None
@@ -214,14 +225,22 @@ fn update_combo_state(
     sample_shift: impl FnOnce() -> bool,
 ) -> Option<Event> {
     if combo && !state.pressed {
+        let shift_down = sample_shift();
         state.pressed = true;
-        return Some(Event::Press {
-            shift_down: sample_shift(),
-        });
+        state.shift_down = shift_down;
+        return Some(Event::Press { shift_down });
     }
     if !combo && state.pressed {
         state.pressed = false;
+        state.shift_down = false;
         return Some(Event::Release);
+    }
+    if combo {
+        let shift_down = sample_shift();
+        if shift_down != state.shift_down {
+            state.shift_down = shift_down;
+            return Some(Event::ShiftChanged { shift_down });
+        }
     }
     None
 }
@@ -244,7 +263,7 @@ mod tests {
             update_combo_state(true, &mut state, || true),
             Some(Event::Press { shift_down: true })
         );
-        assert_eq!(update_combo_state(true, &mut state, || false), None);
+        assert_eq!(update_combo_state(true, &mut state, || true), None);
 
         assert_eq!(release_before_reset(&mut state), Some(Event::Release));
         assert_eq!(release_before_reset(&mut state), None);
@@ -261,7 +280,10 @@ mod tests {
 
     #[test]
     fn shortcut_change_emits_one_release_when_reconfigured_while_pressed() {
-        let mut state = PollState { pressed: true };
+        let mut state = PollState {
+            pressed: true,
+            shift_down: false,
+        };
 
         assert_eq!(release_before_reset(&mut state), Some(Event::Release));
         assert!(!state.pressed);
@@ -269,7 +291,7 @@ mod tests {
     }
 
     #[test]
-    fn shift_is_sampled_only_on_the_accepted_press_edge() {
+    fn shift_changes_are_reported_while_the_combo_remains_held() {
         let mut state = PollState::default();
         let mut samples = 0;
 
@@ -285,7 +307,14 @@ mod tests {
                 samples += 1;
                 false
             }),
-            None
+            Some(Event::ShiftChanged { shift_down: false })
+        );
+        assert_eq!(
+            update_combo_state(true, &mut state, || {
+                samples += 1;
+                true
+            }),
+            Some(Event::ShiftChanged { shift_down: true })
         );
         assert_eq!(
             update_combo_state(false, &mut state, || {
@@ -294,6 +323,6 @@ mod tests {
             }),
             Some(Event::Release)
         );
-        assert_eq!(samples, 1);
+        assert_eq!(samples, 3);
     }
 }

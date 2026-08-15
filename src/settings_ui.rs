@@ -103,6 +103,9 @@ fn apply_dark_theme(ctx: &egui::Context) {
     style.visuals.widgets.hovered.fg_stroke = Stroke::new(1.0, Color32::from_rgb(232, 236, 243));
     style.visuals.window_stroke = Stroke::new(1.0, Color32::from_rgb(54, 61, 76));
     style.visuals.window_rounding = 8.0.into();
+    style.interaction.tooltip_delay = 0.0;
+    style.interaction.show_tooltips_only_when_still = false;
+    style.spacing.tooltip_width = 360.0;
     style.text_styles.insert(
         egui::TextStyle::Heading,
         FontId::new(22.0, FontFamily::Proportional),
@@ -595,43 +598,35 @@ impl SettingsApp {
         self.dirty |= changed;
 
         ui.add_space(8.0);
-        ui.label(
-            egui::RichText::new(format!(
+        ui.horizontal_wrapped(|ui| {
+            ui.label(
+                egui::RichText::new(format!(
                 "Hold {} to record; release any shortcut key to transcribe.",
                 format_shortcut(&self.settings, false)
-            ))
-            .strong(),
-        );
-        match self.settings.enhance.mode {
-            EnhanceMode::Never => {}
-            EnhanceMode::WithShift => {
-                ui.label(
-                    egui::RichText::new(format!(
-                        "Hold {} to also improve the transcript.",
-                        format_shortcut(&self.settings, true)
-                    ))
-                    .small()
-                    .color(secondary_text()),
-                );
+                ))
+                .strong(),
+            );
+            match self.settings.enhance.mode {
+                EnhanceMode::Never => {}
+                EnhanceMode::WithShift => info_button(
+                    ui,
+                    "Press or release additional Shift at any time while recording to turn enhancement on or off.",
+                ),
+                EnhanceMode::Always => {
+                    let shift_is_base_modifier = self
+                        .settings
+                        .hotkey_modifiers
+                        .iter()
+                        .any(|modifier| modifier == "shift");
+                    let behavior = if shift_is_base_modifier {
+                        "Every transcript is enhanced. Shift is part of the recording shortcut, so the additional-Shift bypass is unavailable."
+                    } else {
+                        "Press or release additional Shift at any time while recording to bypass or restore enhancement."
+                    };
+                    info_button(ui, behavior);
+                }
             }
-            EnhanceMode::Always => {
-                let shift_is_base_modifier = self
-                    .settings
-                    .hotkey_modifiers
-                    .iter()
-                    .any(|modifier| modifier == "shift");
-                let behavior = if shift_is_base_modifier {
-                    "Every transcript will be improved. Shift is part of the recording shortcut, so the additional-Shift bypass is unavailable."
-                } else {
-                    "Every transcript will be improved. Hold Shift in addition to the recording shortcut to bypass improvement for one transcript."
-                };
-                ui.label(
-                    egui::RichText::new(behavior)
-                        .small()
-                        .color(secondary_text()),
-                );
-            }
-        }
+        });
         if let Err(error) = self.settings.validate_shortcut() {
             inline_error(ui, error.to_string());
         }
@@ -647,20 +642,18 @@ impl SettingsApp {
                 .unwrap_or(false);
             egui::Frame::group(ui.style()).show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
-                ui.add_enabled_ui(supported, |ui| {
-                    if ui
-                        .radio(self.settings.engine == descriptor.id, descriptor.title)
-                        .clicked()
-                    {
-                        self.settings.engine = descriptor.id.to_string();
-                        self.dirty = true;
-                    }
+                ui.horizontal_wrapped(|ui| {
+                    ui.add_enabled_ui(supported, |ui| {
+                        if ui
+                            .radio(self.settings.engine == descriptor.id, descriptor.title)
+                            .clicked()
+                        {
+                            self.settings.engine = descriptor.id.to_string();
+                            self.dirty = true;
+                        }
+                    });
+                    info_button(ui, descriptor.description);
                 });
-                ui.label(
-                    egui::RichText::new(descriptor.description)
-                        .small()
-                        .color(secondary_text()),
-                );
                 if let Some(state) = state {
                     match state.support {
                         Ok(support) if support.is_supported() => {
@@ -723,29 +716,29 @@ impl SettingsApp {
 
     fn render_output(&mut self, ui: &mut egui::Ui) {
         let before = self.settings.auto_paste;
-        ui.radio_value(
-            &mut self.settings.auto_paste,
-            true,
-            "Paste into the active app",
-        );
-        ui.label(
-            egui::RichText::new(
+        ui.horizontal_wrapped(|ui| {
+            ui.radio_value(
+                &mut self.settings.auto_paste,
+                true,
+                "Paste into the active app",
+            );
+            info_button(
+                ui,
                 "Uses the clipboard temporarily, pastes at the cursor, then restores unchanged clipboard text.",
-            )
-            .small()
-            .color(secondary_text()),
-        );
+            );
+        });
         ui.add_space(4.0);
-        ui.radio_value(
-            &mut self.settings.auto_paste,
-            false,
-            "Copy to the clipboard",
-        );
-        ui.label(
-            egui::RichText::new("Keeps the completed transcript on the clipboard for manual use.")
-                .small()
-                .color(secondary_text()),
-        );
+        ui.horizontal_wrapped(|ui| {
+            ui.radio_value(
+                &mut self.settings.auto_paste,
+                false,
+                "Copy to the clipboard",
+            );
+            info_button(
+                ui,
+                "Keeps the completed transcript on the clipboard for manual use.",
+            );
+        });
         self.dirty |= before != self.settings.auto_paste;
 
         ui.add_space(8.0);
@@ -764,19 +757,43 @@ impl SettingsApp {
     }
 
     fn render_enhancement(&mut self, ui: &mut egui::Ui) {
-        ui.label("When should OpenWritr improve punctuation and wording?");
+        ui.horizontal_wrapped(|ui| {
+            ui.label("When should OpenWritr improve punctuation and wording?");
+            info_button(
+                ui,
+                "Enhancement sends recognized transcript text, never recorded audio, to the selected provider.",
+            );
+        });
         let before_mode = self.settings.enhance.mode;
+        let shift_is_base_modifier = self
+            .settings
+            .hotkey_modifiers
+            .iter()
+            .any(|modifier| modifier == "shift");
         ui.horizontal_wrapped(|ui| {
             ui.radio_value(&mut self.settings.enhance.mode, EnhanceMode::Never, "Never");
+            info_button(ui, "Transcript text never leaves this PC for cleanup.");
             ui.radio_value(
                 &mut self.settings.enhance.mode,
                 EnhanceMode::WithShift,
                 "When Shift is additionally held",
             );
+            info_button(
+                ui,
+                "Press or release additional Shift during recording to turn enhancement on or off.",
+            );
             ui.radio_value(
                 &mut self.settings.enhance.mode,
                 EnhanceMode::Always,
                 "Always",
+            );
+            info_button(
+                ui,
+                if shift_is_base_modifier {
+                    "Every transcript is enhanced. Bypass is unavailable because Shift is part of the recording shortcut."
+                } else {
+                    "Every transcript is enhanced unless additional Shift is held. Shift can be pressed or released during recording."
+                },
             );
         });
         if before_mode != self.settings.enhance.mode {
@@ -785,31 +802,6 @@ impl SettingsApp {
             }
             self.dirty = true;
         }
-        let mode_explanation = match self.settings.enhance.mode {
-            EnhanceMode::Never => {
-                "Never sends transcript text to an external cleanup provider."
-            }
-            EnhanceMode::WithShift => {
-                "Improves a transcript only when Shift is held in addition to the recording shortcut. Shift cannot also be a base shortcut modifier."
-            }
-            EnhanceMode::Always => {
-                if self
-                    .settings
-                    .hotkey_modifiers
-                    .iter()
-                    .any(|modifier| modifier == "shift")
-                {
-                    "Improves every transcript. The additional-Shift bypass is unavailable because Shift is a base shortcut modifier."
-                } else {
-                    "Improves every transcript. Hold an additional Shift with the recording shortcut to bypass improvement once."
-                }
-            }
-        };
-        ui.label(
-            egui::RichText::new(mode_explanation)
-                .small()
-                .color(secondary_text()),
-        );
         if let Some(warning) = self.settings.prompt_override_warning() {
             ui.add_space(6.0);
             message_frame(ui, &warning, warning_color());
@@ -821,12 +813,6 @@ impl SettingsApp {
         }
 
         if self.settings.enhance.mode == EnhanceMode::Never {
-            ui.add_space(4.0);
-            ui.label(
-                egui::RichText::new("No transcript text is sent to an external provider.")
-                    .small()
-                    .color(secondary_text()),
-            );
             if !self.migration_blocked {
                 self.render_disabled_credential_summary(ui);
             }
@@ -835,7 +821,13 @@ impl SettingsApp {
         }
 
         ui.add_space(8.0);
-        ui.label("Provider");
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Provider");
+            info_button(
+                ui,
+                "Only recognized transcript text is sent to the provider. Recorded audio stays on this PC.",
+            );
+        });
         let before_provider = self.settings.enhance.provider.clone();
         ui.horizontal_wrapped(|ui| {
             ui.radio_value(
@@ -857,13 +849,6 @@ impl SettingsApp {
             self.dirty = true;
         }
 
-        ui.label(
-            egui::RichText::new(
-                "Only the recognized transcript text is sent to this provider; recorded audio stays on this PC.",
-            )
-            .small()
-            .color(secondary_text()),
-        );
         ui.add_space(8.0);
 
         match self.settings.enhance.provider.as_str() {
@@ -947,12 +932,9 @@ impl SettingsApp {
                 .changed();
         }
         ui.horizontal_wrapped(|ui| {
-            ui.label(
-                egui::RichText::new(
-                    "Model availability and premium usage depend on your current Copilot plan.",
-                )
-                .small()
-                .color(secondary_text()),
+            info_button(
+                ui,
+                "Model availability and premium usage depend on your current Copilot plan.",
             );
             ui.hyperlink_to(
                 egui::RichText::new("View GitHub model documentation").small(),
@@ -1044,14 +1026,13 @@ impl SettingsApp {
         ui.add_space(10.0);
         ui.separator();
         ui.add_space(6.0);
-        ui.label(egui::RichText::new("Cleanup prompt").strong());
-        ui.label(
-            egui::RichText::new(
+        ui.horizontal_wrapped(|ui| {
+            ui.label(egui::RichText::new("Cleanup prompt").strong());
+            info_button(
+                ui,
                 "Prompts are tuned per provider, endpoint, and exact model or deployment ID.",
-            )
-            .small()
-            .color(secondary_text()),
-        );
+            );
+        });
 
         if self.settings.prompt_overrides.preserves_unsupported_raw() {
             status_label(
@@ -1240,15 +1221,14 @@ impl SettingsApp {
                         .suffix(" s"),
                 )
                 .changed();
+            info_button(
+                ui,
+                &format!(
+                    "The current limit is {}. Reaching it finishes and transcribes the recording automatically.",
+                    format_duration(self.settings.max_record_seconds)
+                ),
+            );
         });
-        ui.label(
-            egui::RichText::new(format!(
-                "Current limit: {}. Reaching it automatically finishes the recording.",
-                format_duration(self.settings.max_record_seconds)
-            ))
-            .small()
-            .color(secondary_text()),
-        );
     }
 
     fn render_about(&mut self, ui: &mut egui::Ui) {
@@ -1649,18 +1629,23 @@ const ENGINE_DESCRIPTORS: &[EngineDescriptor] = &[
 ];
 
 fn section(ui: &mut egui::Ui, title: &str, description: &str, body: impl FnOnce(&mut egui::Ui)) {
-    ui.label(egui::RichText::new(title).size(16.0).strong());
-    ui.label(
-        egui::RichText::new(description)
-            .small()
-            .color(secondary_text()),
-    );
+    ui.horizontal_wrapped(|ui| {
+        ui.label(egui::RichText::new(title).size(16.0).strong());
+        info_button(ui, description);
+    });
     ui.add_space(4.0);
     egui::Frame::group(ui.style()).show(ui, |ui| {
         ui.set_min_width(ui.available_width());
         body(ui);
     });
     ui.add_space(14.0);
+}
+
+fn info_button(ui: &mut egui::Ui, help: &str) {
+    let _ = ui
+        .small_button("i")
+        .on_hover_cursor(egui::CursorIcon::Help)
+        .on_hover_text_at_pointer(help);
 }
 
 fn inline_error(ui: &mut egui::Ui, message: impl Into<String>) {

@@ -40,12 +40,13 @@ server.
   release. Text is pasted at the caret.
 - **Fast**: a 5-second utterance transcribes in well under half a second on
   the NPU (~25–44× realtime); long dictation is chunked transparently.
-- **Optional AI cleanup ("Enhance")**: hold Shift as well, and after
-  transcription the text is sent to GitHub Copilot or any OpenAI-compatible
-  API for punctuation/grammar polish — using *your* credentials, *off by
-  default*.
-- **Unobtrusive**: a small overlay pill with a live level meter appears only
-  while recording; otherwise it's just a tray icon.
+- **Optional AI cleanup ("Enhance")**: press or release Shift at any time
+  during recording to switch cleanup intent live. After transcription the text
+  is sent to GitHub Copilot or any OpenAI-compatible API for
+  punctuation/grammar polish — using *your* credentials, *off by default*.
+- **Unobtrusive**: a small overlay pill centers the live level meter and status
+  on one line, with purple feedback when enhancement is active; otherwise it's
+  just a tray icon.
 
 ## Architecture
 

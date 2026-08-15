@@ -28,8 +28,8 @@ use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreatePen, CreateSolidBrush,
     DeleteDC, DeleteObject, DrawTextW, EndPaint, FillRect, InvalidateRect, Rectangle, RoundRect,
-    SelectObject, SetBkMode, SetTextColor, DT_CENTER, DT_NOPREFIX, DT_VCENTER, DT_WORDBREAK, HDC,
-    PAINTSTRUCT, PS_SOLID, SRCCOPY, TRANSPARENT,
+    SelectObject, SetBkMode, SetTextColor, DT_CALCRECT, DT_CENTER, DT_NOPREFIX, DT_SINGLELINE,
+    DT_VCENTER, DT_WORDBREAK, HDC, PAINTSTRUCT, PS_SOLID, SRCCOPY, TRANSPARENT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -46,8 +46,10 @@ const WIN_W: i32 = 320;
 const WIN_H: i32 = 60;
 const WM_APP_TICK: u32 = WM_USER + 1;
 const NBARS: usize = 22;
-/// Height reserved at the bottom of the pill for the caption under the bars.
-const LABEL_BAND_H: i32 = 16;
+const BAR_W: i32 = 4;
+const BAR_GAP: i32 = 3;
+const WAVEFORM_LABEL_GAP: i32 = 14;
+const WAVEFORM_LABEL_PADDING: i32 = 4;
 /// Hard cap on notice text so a runaway error message can never blow up
 /// layout or `DrawTextW`; longer text is truncated with an ellipsis.
 const MAX_NOTICE_CHARS: usize = 160;
@@ -347,9 +349,12 @@ unsafe extern "system" fn wnd_proc(
                     amplitude,
                     label,
                 } => {
-                    draw_waveform_bars(mem_dc, w, h, color, amplitude);
                     if !label.is_empty() {
-                        draw_caption(mem_dc, w, h, color, &label);
+                        let label_width =
+                            measure_single_line_width(mem_dc, &label) + WAVEFORM_LABEL_PADDING;
+                        let layout = waveform_layout(w, h, label_width);
+                        draw_waveform_bars(mem_dc, &layout, color, amplitude);
+                        draw_caption(mem_dc, layout.label_rect, color, &label);
                     }
                 }
             }
@@ -371,23 +376,40 @@ unsafe extern "system" fn wnd_proc(
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct WaveformLayout {
+    bars_left: i32,
+    bars_center_y: i32,
+    max_bar_height: i32,
+    label_rect: RECT,
+}
+
+fn waveform_layout(w: i32, h: i32, label_width: i32) -> WaveformLayout {
+    let bars_width = NBARS as i32 * BAR_W + (NBARS as i32 - 1) * BAR_GAP;
+    let content_width = bars_width + WAVEFORM_LABEL_GAP + label_width;
+    let content_left = ((w - content_width) / 2).max(8);
+
+    WaveformLayout {
+        bars_left: content_left,
+        bars_center_y: h / 2,
+        max_bar_height: (h - 18).max(6),
+        label_rect: RECT {
+            left: content_left + bars_width + WAVEFORM_LABEL_GAP,
+            top: 4,
+            right: content_left + content_width,
+            bottom: h - 4,
+        },
+    }
+}
+
 /// Renders the 22-bar Gaussian-envelope waveform. `amplitude` (0.0-1.0)
 /// drives overall bar height — computed from live RMS while listening, or a
 /// steady synthetic pulse while processing a job (see `waveform_amplitude`).
 /// This is the same bar math the overlay has always used; only the color
 /// and amplitude source are now parameterized by typed state.
-unsafe fn draw_waveform_bars(mem_dc: HDC, w: i32, h: i32, color: u32, amplitude: f32) {
+unsafe fn draw_waveform_bars(mem_dc: HDC, layout: &WaveformLayout, color: u32, amplitude: f32) {
     let amp = amplitude.clamp(0.0, 1.0);
     let phase = PHASE_MS.load(Ordering::Relaxed) as f32 / 1000.0;
-
-    let bar_w: i32 = 4;
-    let gap: i32 = 3;
-    // Total width of all bars + gaps. Center that block horizontally.
-    let block_w = NBARS as i32 * bar_w + (NBARS as i32 - 1) * gap;
-    let bar_area_left = (w - block_w) / 2;
-    // Leave room for the caption band under the bars.
-    let max_bar_h = (h - LABEL_BAND_H - 10).max(6);
-    let cy = (h - LABEL_BAND_H) / 2;
 
     let bar_brush = CreateSolidBrush(COLORREF(color));
     let old_brush = SelectObject(mem_dc, bar_brush.into());
@@ -402,15 +424,15 @@ unsafe fn draw_waveform_bars(mem_dc: HDC, w: i32, h: i32, color: u32, amplitude:
         let w2 = (phase * 3.2 - t * 4.0).sin();
         let wobble = (w1 * 0.6 + w2 * 0.4) * 0.5 + 0.5;
         let mixed = envelope * (0.35 + 0.65 * wobble) * amp;
-        // Round to even so the bar is symmetric around cy.
-        let mut bar_h = (mixed * max_bar_h as f32).max(6.0) as i32;
+        // Round to even so the bar is symmetric around the center line.
+        let mut bar_h = (mixed * layout.max_bar_height as f32).max(6.0) as i32;
         if bar_h % 2 != 0 {
             bar_h += 1;
         }
-        let x = bar_area_left + i as i32 * (bar_w + gap);
-        let top = cy - bar_h / 2;
+        let x = layout.bars_left + i as i32 * (BAR_W + BAR_GAP);
+        let top = layout.bars_center_y - bar_h / 2;
         let bot = top + bar_h;
-        let _ = Rectangle(mem_dc, x, top, x + bar_w, bot);
+        let _ = Rectangle(mem_dc, x, top, x + BAR_W, bot);
     }
 
     SelectObject(mem_dc, old_pen);
@@ -419,44 +441,81 @@ unsafe fn draw_waveform_bars(mem_dc: HDC, w: i32, h: i32, color: u32, amplitude:
     let _ = DeleteObject(bar_brush.into());
 }
 
-/// Small single-line caption under the waveform bars (e.g. "Listening",
+/// Small single-line caption beside the waveform bars (e.g. "Listening",
 /// "Enhanced", "Queued", "Writing", "Polishing").
-unsafe fn draw_caption(mem_dc: HDC, w: i32, h: i32, color: u32, label: &str) {
+unsafe fn draw_caption(mem_dc: HDC, rect: RECT, color: u32, label: &str) {
     let mut text = label.encode_utf16().collect::<Vec<_>>();
-    let mut rect = RECT {
-        left: 10,
-        top: h - LABEL_BAND_H,
-        right: w - 10,
-        bottom: h - 2,
-    };
+    let mut rect = rect;
     let _ = SetBkMode(mem_dc, TRANSPARENT);
     let _ = SetTextColor(mem_dc, COLORREF(color));
     let _ = DrawTextW(
         mem_dc,
         &mut text,
         &mut rect,
-        DT_CENTER | DT_VCENTER | DT_NOPREFIX,
+        DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX,
     );
+}
+
+unsafe fn measure_single_line_width(mem_dc: HDC, text: &str) -> i32 {
+    if text.is_empty() {
+        return 0;
+    }
+    let mut text = text.encode_utf16().collect::<Vec<_>>();
+    let mut rect = RECT::default();
+    let _ = DrawTextW(
+        mem_dc,
+        &mut text,
+        &mut rect,
+        DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX,
+    );
+    (rect.right - rect.left).max(0)
 }
 
 /// Word-wrapped notice text filling the whole pill (success/info/warning/
 /// error messages, which can be arbitrarily long free-form strings).
 unsafe fn draw_notice_text(mem_dc: HDC, w: i32, h: i32, color: u32, message: &str) {
     let mut text = message.encode_utf16().collect::<Vec<_>>();
+    let horizontal_padding = 18;
+    let available_width = w - horizontal_padding * 2;
+    let single_line_width = measure_single_line_width(mem_dc, message);
     let mut rect = RECT {
-        left: 18,
-        top: 8,
-        right: w - 18,
-        bottom: h - 8,
+        left: horizontal_padding,
+        top: 0,
+        right: w - horizontal_padding,
+        bottom: h,
     };
     let _ = SetBkMode(mem_dc, TRANSPARENT);
     let _ = SetTextColor(mem_dc, COLORREF(color));
-    let _ = DrawTextW(
-        mem_dc,
-        &mut text,
-        &mut rect,
-        DT_CENTER | DT_VCENTER | DT_WORDBREAK | DT_NOPREFIX,
-    );
+    if single_line_width <= available_width {
+        let _ = DrawTextW(
+            mem_dc,
+            &mut text,
+            &mut rect,
+            DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX,
+        );
+    } else {
+        let mut measured = RECT {
+            left: horizontal_padding,
+            top: 0,
+            right: w - horizontal_padding,
+            bottom: 0,
+        };
+        let _ = DrawTextW(
+            mem_dc,
+            &mut text,
+            &mut measured,
+            DT_CALCRECT | DT_CENTER | DT_WORDBREAK | DT_NOPREFIX,
+        );
+        let text_height = (measured.bottom - measured.top).min(h - 8);
+        rect.top = (h - text_height) / 2;
+        rect.bottom = rect.top + text_height;
+        let _ = DrawTextW(
+            mem_dc,
+            &mut text,
+            &mut rect,
+            DT_CENTER | DT_WORDBREAK | DT_NOPREFIX,
+        );
+    }
 }
 
 /// Owns the overlay's current typed state (enabled flag, view, and notice
@@ -823,6 +882,24 @@ mod tests {
     fn listening_labels_match_mac_v15_wording() {
         assert_eq!(listening_label(false), "Listening");
         assert_eq!(listening_label(true), "Enhanced");
+    }
+
+    #[test]
+    fn waveform_and_label_share_one_centered_row() {
+        let label_width = 64;
+        let layout = waveform_layout(WIN_W, WIN_H, label_width);
+        let bars_width = NBARS as i32 * BAR_W + (NBARS as i32 - 1) * BAR_GAP;
+        let content_width = bars_width + WAVEFORM_LABEL_GAP + label_width;
+
+        assert_eq!(
+            layout.label_rect.left,
+            layout.bars_left + bars_width + WAVEFORM_LABEL_GAP
+        );
+        assert!((layout.bars_left * 2 + content_width - WIN_W).abs() <= 1);
+        assert_eq!(layout.bars_center_y, WIN_H / 2);
+        assert!(layout.label_rect.right <= WIN_W - 8);
+        assert!(layout.label_rect.top < layout.bars_center_y);
+        assert!(layout.label_rect.bottom > layout.bars_center_y);
     }
 
     #[test]

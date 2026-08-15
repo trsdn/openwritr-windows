@@ -42,6 +42,9 @@ pub enum UserEvent {
         shift_down: bool,
         delivery_target: Option<DeliveryTarget>,
     },
+    HotkeyShiftChanged {
+        shift_down: bool,
+    },
     HotkeyRelease,
     DiagnosticsExported,
     DiagnosticsExportFailed(String),
@@ -432,6 +435,9 @@ fn hotkey_loop(
                         delivery_target: capture_delivery_target(),
                     }
                 }
+                hotkey::Event::ShiftChanged { shift_down } => {
+                    UserEvent::HotkeyShiftChanged { shift_down }
+                }
                 hotkey::Event::Release => UserEvent::HotkeyRelease,
             };
             if proxy.send_event(user_ev).is_err() {
@@ -523,7 +529,9 @@ fn emit_release_before_poll_reset(
 ) -> bool {
     match hotkey::release_before_reset(poll_state) {
         Some(hotkey::Event::Release) => proxy.send_event(UserEvent::HotkeyRelease).is_ok(),
-        Some(hotkey::Event::Press { .. }) => unreachable!("reset can only synthesize release"),
+        Some(hotkey::Event::Press { .. } | hotkey::Event::ShiftChanged { .. }) => {
+            unreachable!("reset can only synthesize release")
+        }
         None => true,
     }
 }
@@ -716,6 +724,9 @@ impl ApplicationHandler<UserEvent> for AppHandler {
             } => {
                 consume_press_pending(self.state.delivery_interlock.as_ref(), epoch);
                 self.on_press(shift_down, delivery_target);
+            }
+            UserEvent::HotkeyShiftChanged { shift_down } => {
+                self.on_shift_changed(shift_down);
             }
             UserEvent::HotkeyRelease => self.on_release(),
             UserEvent::DiagnosticsExported => {
@@ -1032,6 +1043,30 @@ impl AppHandler {
         if self.state.active_recording.is_some() {
             self.finish_recording(false);
         }
+    }
+
+    fn on_shift_changed(&mut self, shift_down: bool) {
+        let Some(active_recording) = self.state.active_recording.as_mut() else {
+            return;
+        };
+        let shift_is_modifier = active_recording
+            .settings
+            .hotkey_modifiers
+            .iter()
+            .any(|modifier| modifier == "shift");
+        let intent = recording_intent(
+            active_recording.settings.enhance.mode,
+            shift_is_modifier,
+            shift_down,
+        );
+        if intent == active_recording.intent {
+            return;
+        }
+
+        active_recording.intent = intent;
+        self.state.overlay_state.recording_started(intent);
+        self.sync_overlay();
+        info!(?intent, "recording enhancement intent changed");
     }
 
     fn finish_recording(&mut self, timer_limit_reached: bool) {

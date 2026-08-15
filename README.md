@@ -76,15 +76,16 @@ about 2.2 GB after extraction.
 | Combo | Action |
 |---|---|
 | **Hold Ctrl + Win** | Record. Release to transcribe and paste at the caret. |
-| **Optional: hold the configured shortcut + Shift** | Run text cleanup when enhancement mode is set to **Additional Shift**. |
-| **Hold Shift with the shortcut in Always mode** | Bypass cleanup for that recording and deliver the raw transcript. |
+| **Press or release Shift while recording** | Toggle cleanup live in **Additional Shift** mode; the overlay changes between Listening and Enhanced immediately. |
+| **Press or release Shift while recording in Always mode** | Bypass or restore cleanup for the current recording. |
 | **Tray right-click → Settings** | Change hotkey, engine, LLM provider. |
 
-A small dark pill appears at the bottom-center of the primary monitor. It
-distinguishes raw and enhanced listening, queued work, transcription,
-enhancement, success, safe raw fallbacks, provider/credential warnings, and
-errors. Active recording always takes priority over background job status.
-Settings changes take effect after saving — no restart required.
+A small dark pill appears at the bottom-center of the primary monitor. Its
+waveform and current state share one centered line, distinguishing raw and
+enhanced listening, queued work, transcription, enhancement, success, safe raw
+fallbacks, provider/credential warnings, and errors. Active recording always
+takes priority over background job status. Settings changes take effect after
+saving — no restart required.
 
 ## Settings
 
@@ -93,7 +94,9 @@ Tray icon → right-click → **Settings**. All fields:
 - **Recording shortcut**: Ctrl / Shift / Alt / Win modifiers plus an optional
   trigger key. Modifier-only shortcuts require at least two modifiers; F13-F20
   may be used alone. The dialog shows a live shortcut preview and prevents
-  ambiguous Shift-enhancement combinations. Default: Ctrl+Win.
+  ambiguous Shift-enhancement combinations. With Ctrl+Win held, Shift can be
+  pressed or released during the recording to change the enhancement intent
+  immediately. Default: Ctrl+Win.
 - **Transcription engine**: Parakeet CPU INT8 (default), Parakeet NPU, or
   Whisper Large v3 Turbo NPU. Each choice shows hardware availability,
   first-use download size, and local cache status. NPU engines remain visible
@@ -108,8 +111,10 @@ Tray icon → right-click → **Settings**. All fields:
   Start/stop sounds are optional.
 - **Text enhancement**: choose **Never**, **When Shift is additionally held**,
   or **Always**, then select GitHub Copilot or an OpenAI-compatible API.
-  In **Always** mode, additionally holding Shift bypasses cleanup for that
-  recording. The model picker provides advisory presets while preserving
+  Shift is monitored throughout the recording, so the mode and purple overlay
+  indicator update immediately instead of being fixed at the initial key
+  press. In **Always** mode, additional Shift bypasses cleanup while held. The
+  model picker provides advisory presets while preserving
   arbitrary provider-specific model or deployment IDs and legacy settings.
   GitHub mode checks that `gh` is installed and authenticated. OpenAI-compatible
   mode requires a valid base URL, model ID, and API key. API keys are stored in
@@ -120,6 +125,9 @@ Tray icon → right-click → **Settings**. All fields:
   output, or an integrity-validator failure, also falls back to the raw
   transcript with a distinct safety warning.
 - **Advanced**: set the maximum recording duration.
+- Explanatory settings copy is kept behind immediate `i` hover help so the
+  dialog remains compact; warnings, failures, and live availability remain
+  visible.
 - **About, credits & support** (also available directly from the tray menu):
   view the installed version and architecture,
   official website, Microsoft Store, source, releases, issue reporting,
