@@ -110,6 +110,12 @@ fn export_bundle_from(
 
         let runtime_status = collect_runtime_status(runtime_dir)?;
         write_json(&mut zip, "runtime-status.json", &runtime_status, options)?;
+        write_json(
+            &mut zip,
+            "autostart-status.json",
+            &autostart_status(),
+            options,
+        )?;
         let runtime_receipt = runtime_dir.join("runtime-versions.json");
         if runtime_receipt.is_file() {
             let bytes = fs::read(&runtime_receipt)
@@ -160,6 +166,21 @@ fn write_bytes<W: Write + Seek>(
     zip.write_all(bytes)
         .with_context(|| format!("write ZIP entry {name}"))?;
     Ok(())
+}
+
+fn autostart_status() -> Value {
+    let backend = crate::autostart::backend();
+    match backend.state() {
+        Ok(state) => json!({
+            "backend": backend.kind(),
+            "state": state.label(),
+        }),
+        Err(error) => json!({
+            "backend": backend.kind(),
+            "state": "error",
+            "error": error.to_string(),
+        }),
+    }
 }
 
 fn collect_runtime_status(runtime_dir: &Path) -> Result<Value> {

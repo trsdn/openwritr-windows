@@ -9,6 +9,16 @@ pub fn run() -> Result<()> {
     let data_dir = verify_writable_data_directory()?;
     let hardware = asr::whisper_hardware_status().context("inspect Whisper NPU hardware")?;
 
+    let autostart_backend = crate::autostart::backend();
+    let autostart = match autostart_backend.state() {
+        Ok(state) => json!({ "backend": autostart_backend.kind(), "state": state.label() }),
+        Err(error) => json!({
+            "backend": autostart_backend.kind(),
+            "state": "error",
+            "error": error.to_string(),
+        }),
+    };
+
     let report = json!({
         "status": "ok",
         "version": env!("CARGO_PKG_VERSION"),
@@ -17,6 +27,7 @@ pub fn run() -> Result<()> {
         "model_manifest": "ok",
         "data_directory": data_dir,
         "whisper_npu_hardware": hardware,
+        "autostart": autostart,
     });
     println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())

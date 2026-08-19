@@ -2990,6 +2990,7 @@ dependencies = [
  "tracing-subscriber",
  "tray-icon",
  "windows 0.62.2",
+ "windows-future 0.3.2",
  "windows-sys 0.59.0",
  "winit",
  "winresource",

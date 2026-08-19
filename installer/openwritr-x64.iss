@@ -65,14 +65,29 @@ Source: "{#SrcDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs cre
 Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExeName}"; Tasks: startmenuicon
 Name: "{group}\Uninstall {#AppName}"; Filename: "{uninstallexe}"; Tasks: startmenuicon
 Name: "{userdesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"; Tasks: desktopicon
-Name: "{userstartup}\{#AppName}"; Filename: "{app}\{#AppExeName}"; Tasks: autostart
+
+[Registry]
+; Autostart is a HKCU\...\Run value so the app can read, toggle, and verify the
+; exact same mechanism at runtime (Settings → Startup). uninsdeletevalue removes
+; it on uninstall even if the task was unselected but later enabled in the app.
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "OpenWritr"; ValueData: """{app}\{#AppExeName}"""; Flags: uninsdeletevalue; Tasks: autostart
+
+[InstallDelete]
+; Migrate away from the legacy startup-folder shortcut used by older installers,
+; so autostart state never lives in two mechanisms at once.
+Type: files; Name: "{userstartup}\{#AppName}.lnk"
 
 [Run]
 Filename: "{app}\{#AppExeName}"; Description: "Launch {#AppName}"; Flags: nowait postinstall skipifsilent
 
 [UninstallRun]
 Filename: "{cmd}"; Parameters: "/C taskkill /IM {#AppExeName} /F"; Flags: runhidden; RunOnceId: "KillOpenWritr"
+; Always remove the autostart Run value, even if the user enabled it from inside
+; the app after installing without the autostart task (so uninsdeletevalue never
+; recorded it). reg delete is a no-op with exit 1 if it is already gone.
+Filename: "{cmd}"; Parameters: "/C reg delete ""HKCU\Software\Microsoft\Windows\CurrentVersion\Run"" /v OpenWritr /f"; Flags: runhidden; RunOnceId: "RemoveOpenWritrRun"
 
 [UninstallDelete]
 ; Leave user data (settings, models, logs) under %LOCALAPPDATA%\OpenWritr\ alone.
+Type: files; Name: "{userstartup}\{#AppName}.lnk"
 Type: filesandordirs; Name: "{app}"
