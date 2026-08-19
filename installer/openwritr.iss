@@ -84,8 +84,12 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; \
 
 [InstallDelete]
 ; Migrate away from the legacy startup-folder shortcut used by older installers,
-; so autostart state never lives in two mechanisms at once.
-Type: files; Name: "{userstartup}\{#AppName}.lnk"
+; so autostart state never lives in two mechanisms at once. Gated on the autostart
+; task so we only remove the shortcut when we actually write the Run value in its
+; place. If the user deselects autostart on upgrade, the shortcut is left untouched
+; and the app-side migration in autostart.rs remains able to pick it up later —
+; a previously active autostart is never silently dropped.
+Type: files; Name: "{userstartup}\{#AppName}.lnk"; Tasks: autostart
 
 [Run]
 ; Optional: launch right after install. SkipIfSilent so headless installs don't pop a window.
@@ -104,3 +108,21 @@ Filename: "{cmd}"; Parameters: "/C reg delete ""HKCU\Software\Microsoft\Windows\
 ; Only the app/ subfolder is uninstalled. Add a custom message in the wizard.
 Type: files; Name: "{userstartup}\{#AppName}.lnk"
 Type: filesandordirs; Name: "{app}"
+
+[Code]
+{ Preselect the autostart task on upgrade when this user already had autostart
+  enabled by an older install — either the legacy {userstartup} shortcut or the
+  HKCU Run value — so the task defaults to checked and the user does not silently
+  lose autostart by leaving the (otherwise unchecked-by-default) task alone. }
+function LegacyAutostartEnabled(): Boolean;
+begin
+  Result := FileExists(ExpandConstant('{userstartup}\{#AppName}.lnk')) or
+    RegValueExists(HKEY_CURRENT_USER,
+      'Software\Microsoft\Windows\CurrentVersion\Run', 'OpenWritr');
+end;
+
+procedure InitializeWizard();
+begin
+  if LegacyAutostartEnabled() then
+    WizardSelectTasks('autostart');
+end;
