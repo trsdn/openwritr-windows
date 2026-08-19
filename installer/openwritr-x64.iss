@@ -99,8 +99,9 @@ Type: filesandordirs; Name: "{app}"
 [Code]
 { Preselect the autostart task on upgrade when this user already had autostart
   enabled by an older install — either the legacy {userstartup} shortcut or the
-  HKCU Run value — so the task defaults to checked and the user does not silently
-  lose autostart by leaving the (otherwise unchecked-by-default) task alone. }
+  HKCU Run value. Inno remembers the previous task selection across upgrades, so
+  a user who once deselected the task would otherwise get it deselected again by
+  default; this restores it to checked when prior autostart state is detected. }
 function LegacyAutostartEnabled(): Boolean;
 begin
   Result := FileExists(ExpandConstant('{userstartup}\{#AppName}.lnk')) or
