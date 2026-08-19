@@ -36,13 +36,16 @@ System → About. Everything else is x64.
 `openwritr-windows-<arch>-vX.Y.Z-setup.exe` from
 [Releases](https://github.com/trsdn/openwritr-windows/releases/latest)
 and run it. Sets up the Start Menu shortcut, an optional autostart-at-logon
-entry, and a proper uninstaller you'll find under Settings → Apps.
+entry, and a proper uninstaller you'll find under Settings → Apps. You can
+turn autostart on or off any time later under Settings → Startup.
 
 **Portable zip.** Download `openwritr-windows-<arch>-vX.Y.Z.zip` and unzip
 it into **any folder you like** (e.g. `C:\Tools\OpenWritr\`), then run
 `openwritr.exe`. The app finds its DLLs next to the exe — the install
-location doesn't matter. Same binaries as the installer, just no shortcuts
-and no autostart.
+location doesn't matter. Same binaries as the installer, just no shortcuts.
+Autostart is available here too: enable "Run at startup" under Settings →
+Startup, and OpenWritr repairs the entry automatically if you later move the
+folder.
 
 > **Note:** user data (settings, downloaded models, logs) always lives under
 > `%LOCALAPPDATA%\OpenWritr\` — the app creates that folder automatically on

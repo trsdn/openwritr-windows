@@ -1,6 +1,7 @@
 //! egui settings dialog launched as a subprocess.
 
 use crate::about;
+use crate::autostart::{self, AutostartBackend, AutostartState};
 use crate::cleanup::{catalog, PromptSource, PromptTarget};
 use crate::credentials::{store_verified, CredentialStore, WindowsCredentialStore};
 use crate::diagnostics;
@@ -80,6 +81,7 @@ pub fn run_dialog(show_about: bool) -> Result<()> {
                 prompt_editor: PromptEditorState::default(),
                 show_about,
                 about_error: None,
+                autostart: AutostartUi::new(),
             }))
         }),
     )
@@ -135,6 +137,60 @@ struct SettingsApp {
     prompt_editor: PromptEditorState,
     show_about: bool,
     about_error: Option<String>,
+    autostart: AutostartUi,
+}
+
+/// OS autostart state, kept separate from `Settings`: it is machine/OS state,
+/// not settings-file state. It never participates in `persist()`, the dirty
+/// flag, or `SettingsRevision`; it writes through to the OS immediately on
+/// click and is verified by a read-back. This also stops a copied
+/// `settings.json` from silently arming autostart on another machine.
+struct AutostartUi {
+    backend: Box<dyn AutostartBackend>,
+    state: Result<AutostartState, String>,
+    error: Option<String>,
+}
+
+impl AutostartUi {
+    fn new() -> Self {
+        let backend = autostart::backend();
+        let state = backend.state().map_err(|error| error.to_string());
+        Self {
+            backend,
+            state,
+            error: None,
+        }
+    }
+
+    /// Re-read the real OS state so external changes (Task Manager, Settings →
+    /// Apps → Startup) are shown truthfully.
+    fn refresh(&mut self) {
+        self.state = self.backend.state().map_err(|error| error.to_string());
+    }
+
+    fn set_enabled(&mut self, enabled: bool) {
+        let result = if enabled {
+            autostart::enable_verified(self.backend.as_ref())
+        } else {
+            autostart::disable_verified(self.backend.as_ref())
+        };
+        match result {
+            Ok(()) => self.error = None,
+            Err(error) => self.error = Some(error.to_string()),
+        }
+        // Always re-read the truth after a write, success or failure.
+        self.refresh();
+    }
+
+    #[cfg(test)]
+    fn from_backend(backend: Box<dyn AutostartBackend>) -> Self {
+        let state = backend.state().map_err(|error| error.to_string());
+        Self {
+            backend,
+            state,
+            error: None,
+        }
+    }
 }
 
 /// Ephemeral editor state. Draft text is never written until the outer
@@ -1209,6 +1265,42 @@ impl SettingsApp {
         }
     }
 
+    fn render_startup(&mut self, ui: &mut egui::Ui) {
+        const LABEL: &str = "Start OpenWritr automatically when I sign in to Windows";
+        match self.autostart.state.clone() {
+            Ok(AutostartState::DisabledByOs { reason }) => {
+                let mut checked = false;
+                ui.add_enabled_ui(false, |ui| {
+                    ui.checkbox(&mut checked, LABEL);
+                });
+                inline_error(ui, format!("Windows overrides this setting. {reason}"));
+            }
+            Ok(state) => {
+                let mut enabled = state.is_enabled();
+                ui.horizontal_wrapped(|ui| {
+                    let changed = ui.checkbox(&mut enabled, LABEL).changed();
+                    info_button(
+                        ui,
+                        "OpenWritr starts silently in the tray at sign-in — no window opens. This is OS state, not part of your settings file, so it is applied immediately.",
+                    );
+                    if changed {
+                        self.autostart.set_enabled(enabled);
+                    }
+                });
+            }
+            Err(error) => {
+                let mut checked = false;
+                ui.add_enabled_ui(false, |ui| {
+                    ui.checkbox(&mut checked, LABEL);
+                });
+                inline_error(ui, format!("Could not read the startup state: {error}"));
+            }
+        }
+        if let Some(error) = &self.autostart.error {
+            inline_error(ui, format!("Startup change failed: {error}"));
+        }
+    }
+
     fn render_advanced(&mut self, ui: &mut egui::Ui) {
         ui.horizontal_wrapped(|ui| {
             ui.label("Stop recording automatically after");
@@ -1469,6 +1561,12 @@ impl eframe::App for SettingsApp {
                         "Text enhancement",
                         "Optionally send transcript text for punctuation and cleanup.",
                         |ui| self.render_enhancement(ui),
+                    );
+                    section(
+                        ui,
+                        "Startup",
+                        "Control whether OpenWritr runs automatically when you sign in.",
+                        |ui| self.render_startup(ui),
                     );
                     section(ui, "Advanced", "Recording safety limits.", |ui| {
                         self.render_advanced(ui)
@@ -2010,5 +2108,67 @@ mod tests {
         assert!(!insecure_remote_http("http://127.0.0.1:11434/v1"));
         assert!(insecure_remote_http("http://example.com/v1"));
         assert!(!insecure_remote_http("https://example.com/v1"));
+    }
+
+    struct FakeAutostart {
+        state: Mutex<AutostartState>,
+        fail_writes: bool,
+    }
+
+    impl AutostartBackend for FakeAutostart {
+        fn kind(&self) -> &'static str {
+            "fake"
+        }
+        fn state(&self) -> std::result::Result<AutostartState, autostart::AutostartError> {
+            Ok(self.state.lock().clone())
+        }
+        fn enable(&self) -> std::result::Result<(), autostart::AutostartError> {
+            if self.fail_writes {
+                return Err(autostart::AutostartError::VerificationFailed("enable"));
+            }
+            *self.state.lock() = AutostartState::Enabled;
+            Ok(())
+        }
+        fn disable(&self) -> std::result::Result<(), autostart::AutostartError> {
+            if self.fail_writes {
+                return Err(autostart::AutostartError::VerificationFailed("disable"));
+            }
+            *self.state.lock() = AutostartState::Disabled;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn autostart_write_failure_surfaces_an_error_and_does_not_flip_state() {
+        let backend = Box::new(FakeAutostart {
+            state: Mutex::new(AutostartState::Disabled),
+            fail_writes: true,
+        });
+        let mut ui = AutostartUi::from_backend(backend);
+
+        ui.set_enabled(true);
+
+        assert!(
+            ui.error.is_some(),
+            "a failed write must surface an error, not silently succeed"
+        );
+        assert_eq!(ui.state.as_ref().unwrap(), &AutostartState::Disabled);
+    }
+
+    #[test]
+    fn autostart_successful_toggle_updates_state_without_error() {
+        let backend = Box::new(FakeAutostart {
+            state: Mutex::new(AutostartState::Disabled),
+            fail_writes: false,
+        });
+        let mut ui = AutostartUi::from_backend(backend);
+
+        ui.set_enabled(true);
+        assert!(ui.error.is_none());
+        assert_eq!(ui.state.as_ref().unwrap(), &AutostartState::Enabled);
+
+        ui.set_enabled(false);
+        assert!(ui.error.is_none());
+        assert_eq!(ui.state.as_ref().unwrap(), &AutostartState::Disabled);
     }
 }

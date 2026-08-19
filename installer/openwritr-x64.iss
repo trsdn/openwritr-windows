@@ -65,14 +65,52 @@ Source: "{#SrcDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs cre
 Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExeName}"; Tasks: startmenuicon
 Name: "{group}\Uninstall {#AppName}"; Filename: "{uninstallexe}"; Tasks: startmenuicon
 Name: "{userdesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"; Tasks: desktopicon
-Name: "{userstartup}\{#AppName}"; Filename: "{app}\{#AppExeName}"; Tasks: autostart
+
+[Registry]
+; Autostart is a HKCU\...\Run value so the app can read, toggle, and verify the
+; exact same mechanism at runtime (Settings → Startup). uninsdeletevalue removes
+; it on uninstall even if the task was unselected but later enabled in the app.
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "OpenWritr"; ValueData: """{app}\{#AppExeName}"""; Flags: uninsdeletevalue; Tasks: autostart
+
+[InstallDelete]
+; Migrate away from the legacy startup-folder shortcut used by older installers,
+; so autostart state never lives in two mechanisms at once. Gated on the autostart
+; task so we only remove the shortcut when we actually write the Run value in its
+; place. If the user deselects autostart on upgrade, the shortcut is left untouched
+; and the app-side migration in autostart.rs remains able to pick it up later —
+; a previously active autostart is never silently dropped.
+Type: files; Name: "{userstartup}\{#AppName}.lnk"; Tasks: autostart
 
 [Run]
 Filename: "{app}\{#AppExeName}"; Description: "Launch {#AppName}"; Flags: nowait postinstall skipifsilent
 
 [UninstallRun]
 Filename: "{cmd}"; Parameters: "/C taskkill /IM {#AppExeName} /F"; Flags: runhidden; RunOnceId: "KillOpenWritr"
+; Always remove the autostart Run value, even if the user enabled it from inside
+; the app after installing without the autostart task (so uninsdeletevalue never
+; recorded it). reg delete is a no-op with exit 1 if it is already gone.
+Filename: "{cmd}"; Parameters: "/C reg delete ""HKCU\Software\Microsoft\Windows\CurrentVersion\Run"" /v OpenWritr /f"; Flags: runhidden; RunOnceId: "RemoveOpenWritrRun"
 
 [UninstallDelete]
 ; Leave user data (settings, models, logs) under %LOCALAPPDATA%\OpenWritr\ alone.
+Type: files; Name: "{userstartup}\{#AppName}.lnk"
 Type: filesandordirs; Name: "{app}"
+
+[Code]
+// Preselect the autostart task on upgrade when this user already had autostart
+// enabled by an older install — either the legacy startup-folder shortcut or the
+// HKCU Run value. Inno remembers the previous task selection across upgrades, so
+// a user who once deselected the task would otherwise get it deselected again by
+// default; this restores it to checked when prior autostart state is detected.
+function LegacyAutostartEnabled(): Boolean;
+begin
+  Result := FileExists(ExpandConstant('{userstartup}\{#AppName}.lnk')) or
+    RegValueExists(HKEY_CURRENT_USER,
+      'Software\Microsoft\Windows\CurrentVersion\Run', 'OpenWritr');
+end;
+
+procedure InitializeWizard();
+begin
+  if LegacyAutostartEnabled() then
+    WizardSelectTasks('autostart');
+end;
