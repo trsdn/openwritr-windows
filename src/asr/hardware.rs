@@ -62,12 +62,12 @@ fn current_npu_support() -> Result<EngineSupport> {
 fn npu_support_for(architecture: &str, windows: bool, processor: Option<&str>) -> EngineSupport {
     if architecture != "aarch64" {
         return EngineSupport::Unsupported {
-            reason: "Requires the ARM64 build on Snapdragon X Elite.".into(),
+            reason: "Requires the ARM64 build on Snapdragon X Elite or X Plus (X1P64).".into(),
         };
     }
     if !windows {
         return EngineSupport::Unsupported {
-            reason: "Requires Windows on Snapdragon X Elite.".into(),
+            reason: "Requires Windows on Snapdragon X Elite or X Plus (X1P64).".into(),
         };
     }
     let Some(processor) = processor else {
@@ -75,20 +75,24 @@ fn npu_support_for(architecture: &str, windows: bool, processor: Option<&str>) -
             reason: "Could not determine the processor model.".into(),
         };
     };
-    if is_snapdragon_x_elite(processor) {
+    if is_snapdragon_v73(processor) {
         EngineSupport::Supported {
             detail: Some(processor.to_string()),
         }
     } else {
         EngineSupport::Unsupported {
-            reason: format!("Detected {processor}; this model is compiled for Snapdragon X Elite."),
+            reason: format!("Detected {processor}; this model is compiled for Snapdragon X Elite and X Plus X1P64 (Hexagon V73)."),
         }
     }
 }
 
-fn is_snapdragon_x_elite(processor: &str) -> bool {
+fn is_snapdragon_v73(processor: &str) -> bool {
     let processor = processor.to_ascii_lowercase();
-    processor.contains("snapdragon") && (processor.contains("x elite") || processor.contains("x1e"))
+    // X1P64 (X Plus) shares the X Elite Hexagon V73 NPU; X1P42 is untested, so match the SKU.
+    processor.contains("snapdragon")
+        && (processor.contains("x elite")
+            || processor.contains("x1e")
+            || processor.contains("x1p64"))
 }
 
 #[cfg(all(target_arch = "aarch64", windows))]
@@ -145,11 +149,18 @@ mod tests {
     }
 
     #[test]
-    fn npu_support_requires_windows_arm64_snapdragon_x_elite() {
+    fn npu_support_requires_windows_arm64_snapdragon_v73() {
         assert!(!npu_support_for("x86_64", true, None).is_supported());
         assert!(!npu_support_for("aarch64", false, None).is_supported());
+        assert!(npu_support_for(
+            "aarch64",
+            true,
+            Some("Snapdragon(R) X 10-core X1P64100 @ 3.40 GHz")
+        )
+        .is_supported());
         assert!(
-            !npu_support_for("aarch64", true, Some("Snapdragon X Plus X1P64100")).is_supported()
+            !npu_support_for("aarch64", true, Some("Snapdragon(R) X 8-core X1P42100"))
+                .is_supported()
         );
         assert!(npu_support_for(
             "aarch64",

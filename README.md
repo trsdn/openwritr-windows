@@ -26,7 +26,7 @@ admin / UAC required):
 
 | Your machine | Build | Engine |
 |---|---|---|
-| **Snapdragon X Elite** (Surface Pro 11, etc.) | `…-arm64-…` | Parakeet CPU/NPU and Whisper NPU |
+| **Snapdragon X Elite / X Plus (X1P64)** (Surface Pro 11, etc.) | `…-arm64-…` | Parakeet CPU/NPU and Whisper NPU |
 | **Intel / AMD** laptop | `…-x64-…` | CPU INT8 |
 
 Not sure? Snapdragon laptops report "ARM-based processor" in Settings →
@@ -103,7 +103,7 @@ Tray icon → right-click → **Settings**. All fields:
 - **Transcription engine**: Parakeet CPU INT8 (default), Parakeet NPU, or
   Whisper Large v3 Turbo NPU. Each choice shows hardware availability,
   first-use download size, and local cache status. NPU engines remain visible
-  but disabled unless the ARM64 build is running on Snapdragon X Elite.
+  but disabled unless the ARM64 build is running on Snapdragon X Elite or X Plus (X1P64).
 - **Output and feedback**: either paste into the active app or keep the
   transcript on the clipboard. Auto-paste is tied to the foreground top-level
   window captured when recording starts. If focus or the target process
@@ -283,8 +283,8 @@ a useful error.
 | Parakeet TDT 0.6B v3 NPU encoder (QAIRT context binary + wrapper) | [trsdn/parakeet-tdt-0.6b-v3-htp-int8-8s](https://huggingface.co/trsdn/parakeet-tdt-0.6b-v3-htp-int8-8s) | ~632 MB | CC-BY-4.0 | Yes, on first NPU launch |
 | Whisper Large v3 Turbo (QNN encoder, decoder, tokenizer) | [qualcomm/Whisper-Large-V3-Turbo](https://huggingface.co/qualcomm/Whisper-Large-V3-Turbo) | ~2.2 GB extracted | Apache 2.0 + BSD-3 | Yes, on first Whisper launch |
 
-The NPU encoder model is device-gated to Snapdragon X Elite (Hexagon V73).
-It will not run on X Plus or any other Qualcomm chipset without
+The NPU encoder model is device-gated to Snapdragon X Elite and X Plus X1P64 (Hexagon V73).
+It is untested on X1P42 and other Qualcomm chipsets, which may need
 recompilation via AI Hub.
 
 ## Licenses

@@ -1717,12 +1717,12 @@ const ENGINE_DESCRIPTORS: &[EngineDescriptor] = &[
     EngineDescriptor {
         id: "parakeet_npu",
         title: "Parakeet TDT v3 - Snapdragon NPU",
-        description: "Runs the encoder on the Snapdragon X Elite Hexagon NPU.",
+        description: "Runs the encoder on the Snapdragon X Elite / X Plus (X1P64) Hexagon NPU.",
     },
     EngineDescriptor {
         id: "whisper_npu",
         title: "Whisper Large v3 Turbo - Snapdragon NPU",
-        description: "Runs the multilingual Whisper encoder and decoder on Snapdragon X Elite.",
+        description: "Runs the multilingual Whisper encoder and decoder on Snapdragon X Elite / X Plus (X1P64).",
     },
 ];
 
