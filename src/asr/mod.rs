@@ -36,7 +36,7 @@ pub fn whisper_hardware_status() -> Result<String> {
         EngineSupport::Supported { detail } => {
             format!(
                 "supported: {}",
-                detail.unwrap_or_else(|| "Snapdragon X Elite".into())
+                detail.unwrap_or_else(|| "Hexagon NPU".into())
             )
         }
         EngineSupport::Unsupported { reason } => format!("unavailable: {reason}"),

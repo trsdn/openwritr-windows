@@ -1354,6 +1354,196 @@ fn preload_qnn_runtime(_runtime_dir: &Path) -> Result<()> {
     bail!("QNN runtime preloading is supported only on Windows")
 }
 
+// Minimal mirrors of the QNN SDK headers (QnnInterface.h, QnnDevice.h,
+// HTP/QnnHtpDevice.h, API 2.x) needed to read the on-chip HTP architecture.
+mod qnn_device {
+    use std::ffi::{c_char, c_void};
+
+    pub const INTERFACE_CORE_API_MAJOR: u32 = 2;
+    pub const PLATFORM_INFO_VERSION_1: u32 = 1;
+    pub const HARDWARE_DEVICE_INFO_VERSION_1: u32 = 1;
+    pub const HTP_DEVICE_TYPE_ON_CHIP: u32 = 0;
+    /// `deviceGetPlatformInfo` / `deviceFreePlatformInfo` slots in `QNN_INTERFACE_VER_TYPE`.
+    pub const GET_PLATFORM_INFO_SLOT: usize = 37;
+    pub const FREE_PLATFORM_INFO_SLOT: usize = 38;
+
+    pub type GetProvidersFn =
+        unsafe extern "C" fn(providers: *mut *const *const Interface, count: *mut u32) -> u64;
+    pub type GetPlatformInfoFn =
+        unsafe extern "C" fn(logger: *mut c_void, info: *mut *const PlatformInfo) -> u64;
+    pub type FreePlatformInfoFn =
+        unsafe extern "C" fn(logger: *mut c_void, info: *const PlatformInfo) -> u64;
+
+    #[repr(C)]
+    pub struct Version {
+        pub major: u32,
+        pub minor: u32,
+        pub patch: u32,
+    }
+
+    #[repr(C)]
+    pub struct Interface {
+        pub backend_id: u32,
+        pub provider_name: *const c_char,
+        pub core_api_version: Version,
+        pub backend_api_version: Version,
+        pub functions: [*const c_void; FREE_PLATFORM_INFO_SLOT + 1],
+    }
+
+    #[repr(C)]
+    pub struct PlatformInfo {
+        pub version: u32,
+        pub v1: PlatformInfoV1,
+    }
+
+    #[repr(C)]
+    pub struct PlatformInfoV1 {
+        pub num_hw_devices: u32,
+        pub hw_devices: *const HardwareDeviceInfo,
+    }
+
+    #[repr(C)]
+    pub struct HardwareDeviceInfo {
+        pub version: u32,
+        pub v1: HardwareDeviceInfoV1,
+    }
+
+    #[repr(C)]
+    pub struct HardwareDeviceInfoV1 {
+        pub device_id: u32,
+        pub device_type: u32,
+        pub num_cores: u32,
+        pub cores: *const c_void,
+        pub extension: *const HtpDeviceInfoExtension,
+    }
+
+    #[repr(C)]
+    pub struct HtpDeviceInfoExtension {
+        pub dev_type: u32,
+        pub on_chip: HtpOnChipDeviceInfo,
+    }
+
+    #[repr(C)]
+    pub struct HtpOnChipDeviceInfo {
+        pub vtcm_size: usize,
+        pub soc_model: u32,
+        pub signed_pd_support: bool,
+        pub dlbc_support: bool,
+        pub arch: u32,
+    }
+}
+
+/// Hexagon HTP architecture of the on-chip NPU as reported by the pinned
+/// `QnnHtp.dll` (e.g. 73 for V73), or `None` when QNN finds no on-chip HTP.
+/// Probed once per process.
+#[cfg(windows)]
+pub fn htp_architecture() -> Result<Option<u32>> {
+    static ARCH: Lazy<std::result::Result<Option<u32>, String>> =
+        Lazy::new(|| probe_htp_architecture().map_err(|error| format!("{error:#}")));
+    ARCH.clone().map_err(|error| anyhow!(error))
+}
+
+#[cfg(windows)]
+fn probe_htp_architecture() -> Result<Option<u32>> {
+    use qnn_device::*;
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::{s, PCWSTR};
+    use windows::Win32::System::LibraryLoader::{
+        GetProcAddress, LoadLibraryExW, LOAD_LIBRARY_SEARCH_DEFAULT_DIRS,
+        LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR,
+    };
+
+    let runtime_dir = runtime_directory()?;
+    verify_runtime_contract(&runtime_dir)?;
+    preload_qnn_runtime(&runtime_dir)?;
+    let path = runtime_dir.join("QnnHtp.dll");
+    let path_w: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let module = LoadedModule(
+        unsafe {
+            LoadLibraryExW(
+                PCWSTR(path_w.as_ptr()),
+                None,
+                LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS,
+            )
+        }
+        .with_context(|| format!("load {}", path.display()))?,
+    );
+
+    unsafe {
+        let symbol =
+            GetProcAddress(module.0, s!("QnnInterface_getProviders")).ok_or_else(|| {
+                anyhow!(
+                    "{} does not export QnnInterface_getProviders",
+                    path.display()
+                )
+            })?;
+        let get_providers: GetProvidersFn = std::mem::transmute(symbol);
+        let mut providers = ptr::null();
+        let mut count = 0;
+        qnn_check(
+            get_providers(&mut providers, &mut count),
+            "QnnInterface_getProviders",
+        )?;
+        if providers.is_null() || count == 0 {
+            bail!("QnnHtp.dll returned no interface providers");
+        }
+        let interface = std::slice::from_raw_parts(providers, count as usize)
+            .iter()
+            .filter_map(|provider| provider.as_ref())
+            .find(|provider| provider.core_api_version.major == INTERFACE_CORE_API_MAJOR)
+            .ok_or_else(|| {
+                anyhow!("QnnHtp.dll has no QNN {INTERFACE_CORE_API_MAJOR}.x interface")
+            })?;
+        let get_info = interface.functions[GET_PLATFORM_INFO_SLOT];
+        let free_info = interface.functions[FREE_PLATFORM_INFO_SLOT];
+        if get_info.is_null() || free_info.is_null() {
+            bail!("QnnHtp.dll does not implement device platform info");
+        }
+        let get_info: GetPlatformInfoFn = std::mem::transmute(get_info);
+        let free_info: FreePlatformInfoFn = std::mem::transmute(free_info);
+
+        let mut info = ptr::null();
+        qnn_check(
+            get_info(ptr::null_mut(), &mut info),
+            "QnnDevice_getPlatformInfo",
+        )?;
+        let arch = match info.as_ref() {
+            Some(info)
+                if info.version == PLATFORM_INFO_VERSION_1 && !info.v1.hw_devices.is_null() =>
+            {
+                std::slice::from_raw_parts(info.v1.hw_devices, info.v1.num_hw_devices as usize)
+                    .iter()
+                    .filter(|device| device.version == HARDWARE_DEVICE_INFO_VERSION_1)
+                    .filter_map(|device| device.v1.extension.as_ref())
+                    .find(|extension| extension.dev_type == HTP_DEVICE_TYPE_ON_CHIP)
+                    .map(|extension| extension.on_chip.arch)
+            }
+            _ => None,
+        };
+        let _ = free_info(ptr::null_mut(), info);
+        info!(?arch, "probed Hexagon HTP architecture");
+        Ok(arch)
+    }
+}
+
+#[cfg(not(windows))]
+pub fn htp_architecture() -> Result<Option<u32>> {
+    Ok(None)
+}
+
+#[cfg(windows)]
+fn qnn_check(status: u64, call: &str) -> Result<()> {
+    // QNN error codes live in the low 16 bits; higher bits are internal tracking.
+    match status & 0xffff {
+        0 => Ok(()),
+        code => bail!("{call} failed with QNN error {code}"),
+    }
+}
+
 fn require_json_string(value: &serde_json::Value, path: &[&str], expected: &str) -> Result<()> {
     let actual = json_path(value, path)
         .and_then(serde_json::Value::as_str)

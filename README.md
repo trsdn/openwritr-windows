@@ -3,13 +3,14 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Windows 11](https://img.shields.io/badge/Windows-11_24H2-0078D4?logo=windows)](https://github.com/trsdn/openwritr-windows)
 [![Rust](https://img.shields.io/badge/Rust-1.85-DEA584?logo=rust&logoColor=white)](https://www.rust-lang.org)
-[![Snapdragon X Elite](https://img.shields.io/badge/Snapdragon-X_Elite-3253DC?logo=qualcomm&logoColor=white)](https://www.qualcomm.com/products/mobile/snapdragon/pcs-and-tablets/snapdragon-x-elite)
+[![Snapdragon X Elite](https://img.shields.io/badge/Snapdragon-X_Elite-3253DC?logo=qualcomm&logoColor=white)](https://www.qualcomm.com/laptops/products/snapdragon-x-elite)
+[![Snapdragon X Plus](https://img.shields.io/badge/Snapdragon-X_Plus-3253DC?logo=qualcomm&logoColor=white)](https://www.qualcomm.com/laptops/products/snapdragon-x-plus)
 [![Hexagon NPU](https://img.shields.io/badge/Hexagon-NPU-FF2A00?logo=qualcomm&logoColor=white)](https://huggingface.co/trsdn/parakeet-tdt-0.6b-v3-htp-int8-8s)
 [![Release](https://img.shields.io/github/v/release/trsdn/openwritr-windows)](https://github.com/trsdn/openwritr-windows/releases/latest)
 
 Push-to-talk voice-to-text for Windows. Local transcription uses **NVIDIA
 Parakeet TDT 0.6B v3** on CPU or Qualcomm Hexagon NPU, plus native
-**Whisper Large v3 Turbo** on the Snapdragon X Elite NPU.
+**Whisper Large v3 Turbo** on the Snapdragon X Elite / X Plus NPU.
 Optional LLM cleanup via **GitHub Copilot** (Claude Haiku 4.5, GPT-5 Mini,
 GPT-4.1) or any OpenAI-compatible endpoint.
 
@@ -26,7 +27,7 @@ admin / UAC required):
 
 | Your machine | Build | Engine |
 |---|---|---|
-| **Snapdragon X Elite** (Surface Pro 11, etc.) | `…-arm64-…` | Parakeet CPU/NPU and Whisper NPU |
+| **Snapdragon X Elite / X Plus** (Hexagon V73 NPU; Surface Pro 11, etc.) | `…-arm64-…` | Parakeet CPU/NPU and Whisper NPU |
 | **Intel / AMD** laptop | `…-x64-…` | CPU INT8 |
 
 Not sure? Snapdragon laptops report "ARM-based processor" in Settings →
@@ -103,7 +104,9 @@ Tray icon → right-click → **Settings**. All fields:
 - **Transcription engine**: Parakeet CPU INT8 (default), Parakeet NPU, or
   Whisper Large v3 Turbo NPU. Each choice shows hardware availability,
   first-use download size, and local cache status. NPU engines remain visible
-  but disabled unless the ARM64 build is running on Snapdragon X Elite.
+  but disabled unless the ARM64 build is running on a Hexagon V73 NPU
+  (Snapdragon X Elite / X Plus); the app asks the QNN runtime for the NPU
+  architecture rather than matching chip names.
 - **Output and feedback**: either paste into the active app or keep the
   transcript on the clipboard. Auto-paste is tied to the foreground top-level
   window captured when recording starts. If focus or the target process
@@ -268,7 +271,7 @@ the actual audio length within the window.
 The QNN backend loads several sibling DLLs by name at session-create time.
 `scripts/fetch_runtime.py` extracts the exact, hash-pinned set recorded in
 `runtime-manifest.json`. Alongside `onnxruntime_providers_qnn.dll`, the
-X Elite path requires `QnnHtp.dll`, `QnnHtpPrepare.dll`,
+Hexagon V73 NPU path requires `QnnHtp.dll`, `QnnHtpPrepare.dll`,
 `QnnHtpNetRunExtensions.dll`, `QnnSystem.dll`, the V73 stub and skeleton,
 and its catalog file. Without the SKEL + `.cat` pair, the stub fails
 `LoadLibrary` with `ERROR_MOD_NOT_FOUND` (126) and QnnHtp later aborts
@@ -283,9 +286,10 @@ a useful error.
 | Parakeet TDT 0.6B v3 NPU encoder (QAIRT context binary + wrapper) | [trsdn/parakeet-tdt-0.6b-v3-htp-int8-8s](https://huggingface.co/trsdn/parakeet-tdt-0.6b-v3-htp-int8-8s) | ~632 MB | CC-BY-4.0 | Yes, on first NPU launch |
 | Whisper Large v3 Turbo (QNN encoder, decoder, tokenizer) | [qualcomm/Whisper-Large-V3-Turbo](https://huggingface.co/qualcomm/Whisper-Large-V3-Turbo) | ~2.2 GB extracted | Apache 2.0 + BSD-3 | Yes, on first Whisper launch |
 
-The NPU encoder model is device-gated to Snapdragon X Elite (Hexagon V73).
-It will not run on X Plus or any other Qualcomm chipset without
-recompilation via AI Hub.
+The NPU encoder model is compiled for the Hexagon V73 NPU (Snapdragon X
+Elite / X Plus) and is enabled automatically when the QNN runtime reports a
+V73 NPU. Other Hexagon generations (e.g. Snapdragon X2) need the model
+recompiled via AI Hub.
 
 ## Licenses
 
