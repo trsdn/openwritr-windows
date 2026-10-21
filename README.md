@@ -26,7 +26,7 @@ admin / UAC required):
 
 | Your machine | Build | Engine |
 |---|---|---|
-| **Snapdragon X Elite** (Surface Pro 11, etc.) | `…-arm64-…` | Parakeet CPU/NPU and Whisper NPU |
+| **Snapdragon X Elite / X2 Elite** (Surface Pro 11, etc.) | `…-arm64-…` | Parakeet CPU/NPU and Whisper NPU |
 | **Intel / AMD** laptop | `…-x64-…` | CPU INT8 |
 
 Not sure? Snapdragon laptops report "ARM-based processor" in Settings →
@@ -103,7 +103,7 @@ Tray icon → right-click → **Settings**. All fields:
 - **Transcription engine**: Parakeet CPU INT8 (default), Parakeet NPU, or
   Whisper Large v3 Turbo NPU. Each choice shows hardware availability,
   first-use download size, and local cache status. NPU engines remain visible
-  but disabled unless the ARM64 build is running on Snapdragon X Elite.
+  but disabled unless the ARM64 build is running on Snapdragon X Elite or X2 Elite.
 - **Output and feedback**: either paste into the active app or keep the
   transcript on the clipboard. Auto-paste is tied to the foreground top-level
   window captured when recording starts. If focus or the target process

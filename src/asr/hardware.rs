@@ -28,10 +28,59 @@ impl EngineSupport {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NpuTarget {
+    V73, // Snapdragon X Elite (X1E)
+    V81, // Snapdragon X2 Elite (X2E)
+}
+
+impl NpuTarget {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::V73 => "v73",
+            Self::V81 => "v81",
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            Self::V73 => "Snapdragon X Elite",
+            Self::V81 => "Snapdragon X2 Elite",
+        }
+    }
+}
+
+pub fn detect_npu_target(processor: &str) -> Option<NpuTarget> {
+    let p = processor.to_ascii_lowercase();
+    if !p.contains("snapdragon") {
+        return None;
+    }
+    if p.contains("x2 elite") || p.contains("x2e") {
+        Some(NpuTarget::V81)
+    } else if p.contains("x elite") || p.contains("x1e") {
+        Some(NpuTarget::V73)
+    } else {
+        None
+    }
+}
+
+pub fn current_npu_target() -> Option<NpuTarget> {
+    #[cfg(all(target_arch = "aarch64", windows))]
+    {
+        processor_name().ok().as_deref().and_then(detect_npu_target)
+    }
+    #[cfg(not(all(target_arch = "aarch64", windows)))]
+    {
+        None
+    }
+}
+
 pub fn engine_support(engine: &str) -> Result<EngineSupport> {
     match engine {
         "parakeet_cpu" => Ok(EngineSupport::Supported { detail: None }),
-        "parakeet_npu" | "whisper_npu" => current_npu_support(),
+        "whisper_npu" => current_whisper_npu_support(),
+        "parakeet_npu" => current_parakeet_npu_support(),
         other => Err(anyhow!("unknown transcription engine {other}")),
     }
 }
@@ -43,31 +92,35 @@ pub fn ensure_engine_supported(engine: &str) -> Result<()> {
     }
 }
 
-fn current_npu_support() -> Result<EngineSupport> {
+fn current_whisper_npu_support() -> Result<EngineSupport> {
     #[cfg(not(target_arch = "aarch64"))]
     {
-        return Ok(npu_support_for("x86_64", true, None));
+        return Ok(whisper_npu_support_for("x86_64", true, None));
     }
     #[cfg(all(target_arch = "aarch64", not(windows)))]
     {
-        return Ok(npu_support_for("aarch64", false, None));
+        return Ok(whisper_npu_support_for("aarch64", false, None));
     }
     #[cfg(all(target_arch = "aarch64", windows))]
     {
         let processor = processor_name()?;
-        Ok(npu_support_for("aarch64", true, Some(&processor)))
+        Ok(whisper_npu_support_for("aarch64", true, Some(&processor)))
     }
 }
 
-fn npu_support_for(architecture: &str, windows: bool, processor: Option<&str>) -> EngineSupport {
+pub fn whisper_npu_support_for(
+    architecture: &str,
+    windows: bool,
+    processor: Option<&str>,
+) -> EngineSupport {
     if architecture != "aarch64" {
         return EngineSupport::Unsupported {
-            reason: "Requires the ARM64 build on Snapdragon X Elite.".into(),
+            reason: "Requires the ARM64 build on Snapdragon X Elite or X2 Elite.".into(),
         };
     }
     if !windows {
         return EngineSupport::Unsupported {
-            reason: "Requires Windows on Snapdragon X Elite.".into(),
+            reason: "Requires Windows on Snapdragon X Elite or X2 Elite.".into(),
         };
     }
     let Some(processor) = processor else {
@@ -75,20 +128,71 @@ fn npu_support_for(architecture: &str, windows: bool, processor: Option<&str>) -
             reason: "Could not determine the processor model.".into(),
         };
     };
-    if is_snapdragon_x_elite(processor) {
+    if let Some(_target) = detect_npu_target(processor) {
         EngineSupport::Supported {
             detail: Some(processor.to_string()),
         }
     } else {
         EngineSupport::Unsupported {
-            reason: format!("Detected {processor}; this model is compiled for Snapdragon X Elite."),
+            reason: format!(
+                "Detected {processor}; this model requires Snapdragon X Elite or X2 Elite."
+            ),
         }
     }
 }
 
-fn is_snapdragon_x_elite(processor: &str) -> bool {
-    let processor = processor.to_ascii_lowercase();
-    processor.contains("snapdragon") && (processor.contains("x elite") || processor.contains("x1e"))
+fn current_parakeet_npu_support() -> Result<EngineSupport> {
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        return Ok(parakeet_npu_support_for("x86_64", true, None));
+    }
+    #[cfg(all(target_arch = "aarch64", not(windows)))]
+    {
+        return Ok(parakeet_npu_support_for("aarch64", false, None));
+    }
+    #[cfg(all(target_arch = "aarch64", windows))]
+    {
+        let processor = processor_name()?;
+        Ok(parakeet_npu_support_for("aarch64", true, Some(&processor)))
+    }
+}
+
+pub fn parakeet_npu_support_for(
+    architecture: &str,
+    windows: bool,
+    processor: Option<&str>,
+) -> EngineSupport {
+    if architecture != "aarch64" {
+        return EngineSupport::Unsupported {
+            reason: "Requires the ARM64 build on Snapdragon X Elite or X2 Elite.".into(),
+        };
+    }
+    if !windows {
+        return EngineSupport::Unsupported {
+            reason: "Requires Windows on Snapdragon X Elite or X2 Elite.".into(),
+        };
+    }
+    let Some(processor) = processor else {
+        return EngineSupport::Unsupported {
+            reason: "Could not determine the processor model.".into(),
+        };
+    };
+    if let Some(_target) = detect_npu_target(processor) {
+        EngineSupport::Supported {
+            detail: Some(processor.to_string()),
+        }
+    } else {
+        EngineSupport::Unsupported {
+            reason: format!(
+                "Detected {processor}; this model is compiled for Snapdragon X Elite or X2 Elite."
+            ),
+        }
+    }
+}
+
+#[allow(dead_code)]
+pub fn is_snapdragon_x_elite(processor: &str) -> bool {
+    detect_npu_target(processor) == Some(NpuTarget::V73)
 }
 
 #[cfg(all(target_arch = "aarch64", windows))]
@@ -145,16 +249,45 @@ mod tests {
     }
 
     #[test]
-    fn npu_support_requires_windows_arm64_snapdragon_x_elite() {
-        assert!(!npu_support_for("x86_64", true, None).is_supported());
-        assert!(!npu_support_for("aarch64", false, None).is_supported());
+    fn whisper_npu_support_for_x_elite_and_x2_elite() {
+        assert!(!whisper_npu_support_for("x86_64", true, None).is_supported());
+        assert!(!whisper_npu_support_for("aarch64", false, None).is_supported());
         assert!(
-            !npu_support_for("aarch64", true, Some("Snapdragon X Plus X1P64100")).is_supported()
+            !whisper_npu_support_for("aarch64", true, Some("Snapdragon X Plus X1P64100"))
+                .is_supported()
         );
-        assert!(npu_support_for(
+        assert!(whisper_npu_support_for(
             "aarch64",
             true,
             Some("Snapdragon(R) X 12-core X1E80100 @ 3.40 GHz")
+        )
+        .is_supported());
+        assert!(whisper_npu_support_for(
+            "aarch64",
+            true,
+            Some("Snapdragon(R) X2 Elite Extreme - X2E94100 - Qualcomm Oryon(TM) CPU")
+        )
+        .is_supported());
+    }
+
+    #[test]
+    fn parakeet_npu_support_for_x_elite_and_x2_elite() {
+        assert!(!parakeet_npu_support_for("x86_64", true, None).is_supported());
+        assert!(!parakeet_npu_support_for("aarch64", false, None).is_supported());
+        assert!(
+            !parakeet_npu_support_for("aarch64", true, Some("Snapdragon X Plus X1P64100"))
+                .is_supported()
+        );
+        assert!(parakeet_npu_support_for(
+            "aarch64",
+            true,
+            Some("Snapdragon(R) X 12-core X1E80100 @ 3.40 GHz")
+        )
+        .is_supported());
+        assert!(parakeet_npu_support_for(
+            "aarch64",
+            true,
+            Some("Snapdragon(R) X2 Elite Extreme - X2E94100 - Qualcomm Oryon(TM) CPU")
         )
         .is_supported());
     }

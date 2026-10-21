@@ -1042,7 +1042,9 @@ mod tests {
         assert_eq!(prepared.body["model"], "private-deployment-42");
         let messages = prepared.body["messages"].as_array().unwrap();
         assert_eq!(messages[0]["role"], "system");
-        assert_eq!(messages[0]["content"], "Use the frozen prompt.");
+        let system_content = messages[0]["content"].as_str().unwrap();
+        assert!(system_content.starts_with("Use the frozen prompt."));
+        assert!(system_content.contains(crate::cleanup::TRANSCRIPT_ONLY_POLICY));
         assert_eq!(messages[1]["role"], "user");
         assert_eq!(messages[1]["content"], "raw transcript");
     }

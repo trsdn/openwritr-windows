@@ -173,6 +173,8 @@ def main():
     ap.add_argument("--seconds", type=int, default=28,
                     help="static audio window length in seconds (default 28; "
                          "shorter = faster NPU inference but caps push-to-talk length)")
+    ap.add_argument("--freeze-only", action="store_true",
+                    help="stop after saving encoder-frozen.onnx (skip local quantize_static)")
     args = ap.parse_args()
 
     global AUDIO_SECONDS, MEL_FRAMES
@@ -182,12 +184,12 @@ def main():
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     T = MEL_FRAMES
-    print(f"window: {AUDIO_SECONDS} s → {MEL_FRAMES} mel frames")
+    print(f"window: {AUDIO_SECONDS} s -> {MEL_FRAMES} mel frames")
 
     print(f"loading FP32 encoder: {args.fp32_encoder}")
     m = onnx.load(args.fp32_encoder, load_external_data=True)
 
-    # Surgery FIRST, freeze LAST. gs.import_onnx → gs.export_onnx silently
+    # Surgery FIRST, freeze LAST. gs.import_onnx -> gs.export_onnx silently
     # drops the dim_value annotations on graph inputs/outputs, so anything we
     # set before the roundtrip is lost.
     print("replacing dynamic mask subgraph with constant Range tensor")
@@ -213,6 +215,9 @@ def main():
         location="encoder-frozen.onnx.data",
     )
     print(f"  wrote {frozen_path}")
+    if args.freeze_only:
+        print("freeze complete (--freeze-only requested)")
+        return
 
     print("running quant_pre_process (shape inference + symbolic folding)")
     pre_path = out_dir / "encoder-pre.onnx"

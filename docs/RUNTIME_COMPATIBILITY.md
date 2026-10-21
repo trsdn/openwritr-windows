@@ -13,7 +13,8 @@ The pinned candidate tuple is:
 | `onnxruntime-qnn` | `2.1.1` |
 | QAIRT runtime | `2.45.41` |
 | AI Hub compile line | `2.45` |
-| First NPU target | Snapdragon X Elite |
+| First NPU target | Snapdragon X Elite (V73) |
+| Second NPU target | Snapdragon X2 Elite (V81) |
 
 `onnxruntime-qnn` 2.1.1 declares an exact dependency on ONNX Runtime
 1.24.4. Do not force it onto ONNX Runtime 1.25 with `--no-deps`: that
@@ -47,7 +48,7 @@ CI can verify hashes, archive contents, Rust builds, API-24 initialization,
 CPU inference, and package manifests without NPU hardware. The following
 must pass on Snapdragon X Elite:
 
-- QNN provider registration and V73 device enumeration.
+- QNN provider registration and V73/V81 device enumeration.
 - Parakeet NPU context loading and inference.
 - Whisper encoder and decoder context loading and inference.
 - Numerical and latency checks against the pinned reference corpus.

@@ -44,6 +44,7 @@
       "version": "trsdn-761c5e09+istupakov-8f23f0c0",
       "local_dir": "parakeet-tdt-0.6b-v3-htp-int8-8s",
       "architecture": "aarch64",
+      "npu_target": "v73",
       "files": [
         {
           "path": "encoder-model.onnx",
@@ -84,10 +85,56 @@
       ]
     },
     {
+      "id": "parakeet_npu",
+      "version": "qualcomm-jgk63vww5+istupakov-8f23f0c0",
+      "local_dir": "parakeet-tdt-0.6b-v3-htp-int8-8s-x2e",
+      "architecture": "aarch64",
+      "npu_target": "v81",
+      "files": [
+        {
+          "path": "encoder-model.onnx",
+          "url": "https://huggingface.co/trsdn/parakeet-tdt-0.6b-v3-htp-int8-8s-x2e/resolve/main/encoder-model.onnx",
+          "bytes": 468,
+          "sha256": "e40e2fc2fcfb30b0537b7ea240274961f86a01d4b4b0e1e7a7ca4ec0c3b2d1cf"
+        },
+        {
+          "path": "encoder-model.bin",
+          "url": "https://huggingface.co/trsdn/parakeet-tdt-0.6b-v3-htp-int8-8s-x2e/resolve/main/encoder-model.bin",
+          "bytes": 628207616,
+          "sha256": "3dd4977322db4eca28dd27d19d37bb17b08caf48fedf759bb917c8277494942e"
+        },
+        {
+          "path": "decoder_joint-model.int8.onnx",
+          "url": "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/8f23f0c03c8761650bdb5b40aaf3e40d2c15f1ce/decoder_joint-model.int8.onnx",
+          "bytes": 18202004,
+          "sha256": "eea7483ee3d1a30375daedc8ed83e3960c91b098812127a0d99d1c8977667a70"
+        },
+        {
+          "path": "nemo128.onnx",
+          "url": "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/8f23f0c03c8761650bdb5b40aaf3e40d2c15f1ce/nemo128.onnx",
+          "bytes": 139764,
+          "sha256": "a9fde1486ebfcc08f328d75ad4610c67835fea58c73ba57e3209a6f6cf019e9f"
+        },
+        {
+          "path": "vocab.txt",
+          "url": "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/8f23f0c03c8761650bdb5b40aaf3e40d2c15f1ce/vocab.txt",
+          "bytes": 93939,
+          "sha256": "d58544679ea4bc6ac563d1f545eb7d474bd6cfa467f0a6e2c1dc1c7d37e3c35d"
+        },
+        {
+          "path": "config.json",
+          "url": "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/8f23f0c03c8761650bdb5b40aaf3e40d2c15f1ce/config.json",
+          "bytes": 97,
+          "sha256": "666903c76b9798caf2c210afd4f6cd60b08a8dbf9800ec8d7a3bc0d2148ac466"
+        }
+      ]
+    },
+    {
       "id": "whisper_npu",
       "version": "qualcomm-v0.57.3+openai-41f01f3f",
       "local_dir": "whisper-large-v3-turbo-qnn-v0.57.3",
       "architecture": "aarch64",
+      "npu_target": "v73",
       "archive": {
         "url": "https://qaihub-public-assets.s3.us-west-2.amazonaws.com/qai-hub-models/models/whisper_large_v3_turbo/releases/v0.57.3/whisper_large_v3_turbo-precompiled_qnn_onnx-float-qualcomm_snapdragon_x_elite.zip?versionId=KdvWg7OKMXvBlcRdnFMLE5W6RHwlxUJ3",
         "bytes": 2018906307,
@@ -119,6 +166,100 @@
           },
           {
             "archive_path": "whisper_large_v3_turbo-precompiled_qnn_onnx-float-qualcomm_snapdragon_x_elite/decoder.onnx",
+            "path": "decoder.onnx",
+            "bytes": 3163,
+            "sha256": "06e75b1b3221248ee45c1ba5aade2bc4c1a5465ff62dcb3316d40735b2293a41"
+          }
+        ]
+      },
+      "files": [
+        {
+          "path": "added_tokens.json",
+          "url": "https://huggingface.co/openai/whisper-large-v3-turbo/resolve/41f01f3fe87f28c78e2fbf8b568835947dd65ed9/added_tokens.json",
+          "bytes": 34648,
+          "sha256": "3c51f66c4c21f9e126970078f11ae77a78c74aee8df606ee9daba86e467108e0"
+        },
+        {
+          "path": "generation_config.json",
+          "url": "https://huggingface.co/openai/whisper-large-v3-turbo/resolve/41f01f3fe87f28c78e2fbf8b568835947dd65ed9/generation_config.json",
+          "bytes": 3772,
+          "sha256": "cce11bfe3aaa6ae9e072ea2637caaec8795e68d9b67e655a5af16ee509681a4c"
+        },
+        {
+          "path": "tokenizer.json",
+          "url": "https://huggingface.co/openai/whisper-large-v3-turbo/resolve/41f01f3fe87f28c78e2fbf8b568835947dd65ed9/tokenizer.json",
+          "bytes": 2710337,
+          "sha256": "297b13372ac43916285644fb9687add3cc62ee2a1adb60da3dc25cc94c1871fd"
+        },
+        {
+          "path": "tokenizer_config.json",
+          "url": "https://huggingface.co/openai/whisper-large-v3-turbo/resolve/41f01f3fe87f28c78e2fbf8b568835947dd65ed9/tokenizer_config.json",
+          "bytes": 282843,
+          "sha256": "844b642c73a91359722f47b35705f7174686df33d252695d8572cf9ac03a6389"
+        },
+        {
+          "path": "special_tokens_map.json",
+          "url": "https://huggingface.co/openai/whisper-large-v3-turbo/resolve/41f01f3fe87f28c78e2fbf8b568835947dd65ed9/special_tokens_map.json",
+          "bytes": 2186,
+          "sha256": "baea4ea09372eb4fca86b4e4346139fd73cb807d5087e9de0948e971739c3e74"
+        },
+        {
+          "path": "merges.txt",
+          "url": "https://huggingface.co/openai/whisper-large-v3-turbo/resolve/41f01f3fe87f28c78e2fbf8b568835947dd65ed9/merges.txt",
+          "bytes": 493869,
+          "sha256": "2df2990a395e35e8dfbc7511e08c12d56018d8d04691e0133e5d63b21e154dc6"
+        },
+        {
+          "path": "vocab.json",
+          "url": "https://huggingface.co/openai/whisper-large-v3-turbo/resolve/41f01f3fe87f28c78e2fbf8b568835947dd65ed9/vocab.json",
+          "bytes": 1036558,
+          "sha256": "e2aa043ef015641d363d8288e7c241c85e36a5c761fb303598e0710233344387"
+        },
+        {
+          "path": "preprocessor_config.json",
+          "url": "https://huggingface.co/openai/whisper-large-v3-turbo/resolve/41f01f3fe87f28c78e2fbf8b568835947dd65ed9/preprocessor_config.json",
+          "bytes": 340,
+          "sha256": "7ccc62c6f2765af1f3b46c00c9b5894426835a05021c8b9c01eecb6dfb542711"
+        }
+      ]
+    },
+    {
+      "id": "whisper_npu",
+      "version": "qualcomm-v0.57.3-x2e+openai-41f01f3f",
+      "local_dir": "whisper-large-v3-turbo-qnn-v0.57.3-x2e",
+      "architecture": "aarch64",
+      "npu_target": "v81",
+      "archive": {
+        "url": "https://qaihub-public-assets.s3.us-west-2.amazonaws.com/qai-hub-models/models/whisper_large_v3_turbo/releases/v0.57.3/whisper_large_v3_turbo-precompiled_qnn_onnx-float-qualcomm_snapdragon_x2_elite.zip?versionId=8._3AtShSbWmaae0z9KFTjV6WGbf0QkC",
+        "bytes": 2016739522,
+        "sha256": "ce7dc15c7e4f81163091628b1abcffddaca41f04bb77120938de65fa3c7e5e8f",
+        "files": [
+          {
+            "archive_path": "whisper_large_v3_turbo-precompiled_qnn_onnx-float-qualcomm_snapdragon_x2_elite/metadata.json",
+            "path": "metadata.json",
+            "bytes": 10429,
+            "sha256": "8dab97509ff048082f13b460352cbfea6485cdf39499a32447bdb0026347cee6"
+          },
+          {
+            "archive_path": "whisper_large_v3_turbo-precompiled_qnn_onnx-float-qualcomm_snapdragon_x2_elite/encoder_qairt_context.bin",
+            "path": "encoder_qairt_context.bin",
+            "bytes": 1753604096,
+            "sha256": "0157fab1d8ed9f2ec223232971e47e4bb1e967dc00c461a8a35a370f7dfbc716"
+          },
+          {
+            "archive_path": "whisper_large_v3_turbo-precompiled_qnn_onnx-float-qualcomm_snapdragon_x2_elite/encoder.onnx",
+            "path": "encoder.onnx",
+            "bytes": 1138,
+            "sha256": "56b79179d03774ca2fb7aacb8dbd7a15f6eb752685dce198c04249b7c2a259ba"
+          },
+          {
+            "archive_path": "whisper_large_v3_turbo-precompiled_qnn_onnx-float-qualcomm_snapdragon_x2_elite/decoder_qairt_context.bin",
+            "path": "decoder_qairt_context.bin",
+            "bytes": 452878336,
+            "sha256": "645d3176d9520c5549a62d32d9e489f5f1928c16d457aa585ec3c5671784ebd9"
+          },
+          {
+            "archive_path": "whisper_large_v3_turbo-precompiled_qnn_onnx-float-qualcomm_snapdragon_x2_elite/decoder.onnx",
             "path": "decoder.onnx",
             "bytes": 3163,
             "sha256": "06e75b1b3221248ee45c1ba5aade2bc4c1a5465ff62dcb3316d40735b2293a41"

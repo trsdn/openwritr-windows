@@ -1083,7 +1083,8 @@ mod tests {
         );
         let resolved = settings.resolve_prompt(&target);
         assert_eq!(resolved.source, cleanup::PromptSource::CustomOverride);
-        assert_eq!(resolved.system, "custom cleanup prompt");
+        assert!(resolved.system.starts_with("custom cleanup prompt"));
+        assert!(resolved.system.contains(cleanup::TRANSCRIPT_ONLY_POLICY));
     }
 
     #[test]

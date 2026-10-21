@@ -19,7 +19,10 @@ mod whisper_mel;
 mod whisper_npu;
 mod whisper_tokenizer;
 
-pub use hardware::{engine_support, ensure_engine_supported, EngineSupport};
+#[allow(unused_imports)]
+pub use hardware::{
+    current_npu_target, engine_support, ensure_engine_supported, EngineSupport, NpuTarget,
+};
 pub use parakeet::ParakeetEngine;
 
 pub trait Engine: Send {

@@ -89,6 +89,7 @@ pub enum ProcessingPhase {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NoticeKind {
     Success,
+    #[allow(dead_code)]
     Info,
     Warning,
     RawFallback,

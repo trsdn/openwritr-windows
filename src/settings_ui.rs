@@ -99,11 +99,13 @@ fn apply_dark_theme(ctx: &egui::Context) {
     style.visuals.widgets.active.bg_fill = Color32::from_rgb(79, 140, 255);
     style.visuals.widgets.hovered.bg_fill = Color32::from_rgb(52, 58, 73);
     style.visuals.widgets.noninteractive.fg_stroke =
-        Stroke::new(1.0, Color32::from_rgb(232, 236, 243));
-    style.visuals.widgets.inactive.fg_stroke = Stroke::new(1.0, Color32::from_rgb(232, 236, 243));
-    style.visuals.widgets.active.fg_stroke = Stroke::new(1.0, Color32::WHITE);
-    style.visuals.widgets.hovered.fg_stroke = Stroke::new(1.0, Color32::from_rgb(232, 236, 243));
-    style.visuals.window_stroke = Stroke::new(1.0, Color32::from_rgb(54, 61, 76));
+        Stroke::new(1.0_f32, Color32::from_rgb(232, 236, 243));
+    style.visuals.widgets.inactive.fg_stroke =
+        Stroke::new(1.0_f32, Color32::from_rgb(232, 236, 243));
+    style.visuals.widgets.active.fg_stroke = Stroke::new(1.0_f32, Color32::WHITE);
+    style.visuals.widgets.hovered.fg_stroke =
+        Stroke::new(1.0_f32, Color32::from_rgb(232, 236, 243));
+    style.visuals.window_stroke = Stroke::new(1.0_f32, Color32::from_rgb(54, 61, 76));
     style.visuals.window_rounding = 8.0.into();
     style.interaction.tooltip_delay = 0.0;
     style.interaction.show_tooltips_only_when_still = false;
@@ -1722,7 +1724,8 @@ const ENGINE_DESCRIPTORS: &[EngineDescriptor] = &[
     EngineDescriptor {
         id: "whisper_npu",
         title: "Whisper Large v3 Turbo - Snapdragon NPU",
-        description: "Runs the multilingual Whisper encoder and decoder on Snapdragon X Elite.",
+        description:
+            "Runs the multilingual Whisper encoder and decoder on Snapdragon X Elite and X2 Elite.",
     },
 ];
 

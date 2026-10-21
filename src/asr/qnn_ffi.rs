@@ -26,6 +26,9 @@ const ARM64_QNN_RUNTIME_FILES: &[&str] = &[
     "QnnHtpV73Stub.dll",
     "libQnnHtpV73Skel.so",
     "libqnnhtpv73.cat",
+    "QnnHtpV81Stub.dll",
+    "libQnnHtpV81Skel.so",
+    "libqnnhtpv81.cat",
     "QnnSystem.dll",
 ];
 

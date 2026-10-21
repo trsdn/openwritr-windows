@@ -271,6 +271,7 @@ pub fn enhance_outcome(
 /// Compatibility facade retained for callers that still expect provider and
 /// credential failures as `Err`. New worker code consumes [`EnhanceOutcome`]
 /// directly.
+#[allow(dead_code)]
 pub fn enhance(text: &str, settings: &Settings) -> Result<String> {
     let outcome = enhance_outcome(text, settings, || true)
         .ok_or_else(|| anyhow!("enhancement was cancelled"))?;
@@ -293,6 +294,7 @@ pub fn enhance(text: &str, settings: &Settings) -> Result<String> {
     }
 }
 
+#[allow(dead_code)]
 fn fallback_diagnostic(reason: &FallbackReason) -> &'static str {
     match reason {
         FallbackReason::UnknownProvider => "unknown enhancement provider",

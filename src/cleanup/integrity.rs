@@ -610,11 +610,8 @@ mod tests {
 
     #[test]
     fn modest_cleanup_expansion_is_not_rejected() {
-        let report = validate(
-            "um can you please send it",
-            "Can you please send it to me?",
-        )
-        .unwrap();
+        let report =
+            validate("um can you please send it", "Can you please send it to me?").unwrap();
         assert!(!report
             .error_kinds()
             .contains(&ViolationKind::TranscriptExpanded));

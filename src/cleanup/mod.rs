@@ -48,6 +48,6 @@ pub use pipeline::{
 };
 pub use prompt::{
     resolve_prompt, NoOverrides, PromptOverrides, PromptSource, PromptTarget, PromptTargetError,
-    ResolvedPrompt, Transcript, GLOBAL_DEFAULT_SYSTEM,
+    ResolvedPrompt, Transcript, GLOBAL_DEFAULT_SYSTEM, TRANSCRIPT_ONLY_POLICY,
 };
 pub use provider::{EnhanceProvider, UnknownProvider, COPILOT_CHAT_COMPLETIONS_URL};

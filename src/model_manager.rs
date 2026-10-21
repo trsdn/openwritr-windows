@@ -112,6 +112,8 @@ struct ModelManifest {
     local_dir: String,
     architecture: String,
     #[serde(default)]
+    npu_target: Option<String>,
+    #[serde(default)]
     files: Vec<DirectFile>,
     archive: Option<ArchiveArtifact>,
 }
@@ -244,12 +246,7 @@ impl ModelManager {
     where
         F: FnMut(ModelState),
     {
-        let model = self
-            .manifest
-            .models
-            .iter()
-            .find(|model| model.id == model_id)
-            .ok_or_else(|| anyhow!("unknown model {model_id}"))?;
+        let model = resolve_model(&self.manifest, model_id)?;
         if model.architecture != "any" && model.architecture != std::env::consts::ARCH {
             bail!(
                 "model {} requires {}, current architecture is {}",
@@ -487,13 +484,46 @@ impl ModelManager {
     }
 }
 
-fn inspect_model_at(root: &Path, model_id: &str) -> Result<ModelInfo, ModelError> {
-    let manifest = parse_embedded_manifest()?;
-    let model = manifest
+fn resolve_model<'a>(
+    manifest: &'a ManifestRoot,
+    model_id: &str,
+) -> Result<&'a ModelManifest, ModelError> {
+    let matching: Vec<&'a ModelManifest> = manifest
         .models
         .iter()
-        .find(|model| model.id == model_id)
-        .ok_or_else(|| ModelError::from(anyhow!("unknown model {model_id}")))?;
+        .filter(|model| model.id == model_id)
+        .collect();
+
+    if matching.is_empty() {
+        bail!("unknown model {model_id}");
+    }
+    if matching.len() == 1 {
+        return Ok(matching[0]);
+    }
+
+    if let Some(target) = crate::asr::current_npu_target() {
+        let target_str = target.as_str();
+        if let Some(found) = matching
+            .iter()
+            .find(|m| m.npu_target.as_deref() == Some(target_str))
+        {
+            return Ok(*found);
+        }
+    }
+
+    if let Some(found) = matching
+        .iter()
+        .find(|m| m.npu_target.as_deref() == Some("v73"))
+    {
+        return Ok(*found);
+    }
+
+    Ok(matching[0])
+}
+
+fn inspect_model_at(root: &Path, model_id: &str) -> Result<ModelInfo, ModelError> {
+    let manifest = parse_embedded_manifest()?;
+    let model = resolve_model(&manifest, model_id)?;
     inspect_manifest_model(root, manifest.schema_version, model)
 }
 
@@ -568,12 +598,20 @@ pub fn diagnostic_status(root: &Path) -> anyhow::Result<serde_json::Value> {
                 .then(|| fs::read(directory.join("model-receipt.json")).ok())
                 .flatten()
                 .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
+            let architecture_supported = (model.architecture == "any"
+                || model.architecture == std::env::consts::ARCH)
+                && match &model.npu_target {
+                    Some(target) => crate::asr::current_npu_target()
+                        .map(|t| t.as_str() == target)
+                        .unwrap_or(false),
+                    None => true,
+                };
             json!({
                 "id": model.id,
                 "version": model.version,
                 "architecture": model.architecture,
-                "architecture_supported": model.architecture == "any"
-                    || model.architecture == std::env::consts::ARCH,
+                "architecture_supported": architecture_supported,
+                "npu_target": model.npu_target,
                 "directory": model.local_dir,
                 "directory_present": directory.is_dir(),
                 "receipt": receipt,
@@ -620,11 +658,16 @@ fn validate_manifest(manifest: &ManifestRoot) -> Result<(), ModelError> {
             manifest.schema_version
         );
     }
-    let mut ids = HashSet::new();
+    let mut model_targets = HashSet::new();
     let mut directories = HashSet::new();
     for model in &manifest.models {
-        if !ids.insert(model.id.as_str()) {
-            bail!("duplicate model id {}", model.id);
+        let target_key = (model.id.as_str(), model.npu_target.as_deref().unwrap_or(""));
+        if !model_targets.insert(target_key) {
+            bail!(
+                "duplicate model id {} for target {:?}",
+                model.id,
+                model.npu_target
+            );
         }
         if !directories.insert(model.local_dir.as_str()) {
             bail!("duplicate model directory {}", model.local_dir);
@@ -632,6 +675,11 @@ fn validate_manifest(manifest: &ManifestRoot) -> Result<(), ModelError> {
         validate_relative_path(&model.local_dir)?;
         if !matches!(model.architecture.as_str(), "any" | "aarch64" | "x86_64") {
             bail!("unsupported architecture {}", model.architecture);
+        }
+        if let Some(target) = &model.npu_target {
+            if !matches!(target.as_str(), "v73" | "v81") {
+                bail!("unsupported npu target {} in {}", target, model.id);
+            }
         }
         if model.files.is_empty() && model.archive.is_none() {
             bail!("model {} has no artifacts", model.id);
@@ -1135,6 +1183,7 @@ mod tests {
                 version: "1".into(),
                 local_dir: "test-model".into(),
                 architecture: "any".into(),
+                npu_target: None,
                 files: vec![DirectFile {
                     path: "model.bin".into(),
                     url: url.into(),
@@ -1350,6 +1399,7 @@ mod tests {
                 version: "1".into(),
                 local_dir: "test-model".into(),
                 architecture: "any".into(),
+                npu_target: None,
                 files: Vec::new(),
                 archive: Some(ArchiveArtifact {
                     url: url.into(),

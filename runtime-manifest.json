@@ -93,6 +93,21 @@
               "required": true
             },
             {
+              "source": "onnxruntime_qnn/QnnHtpV81Stub.dll",
+              "target": "QnnHtpV81Stub.dll",
+              "required": true
+            },
+            {
+              "source": "onnxruntime_qnn/libQnnHtpV81Skel.so",
+              "target": "libQnnHtpV81Skel.so",
+              "required": true
+            },
+            {
+              "source": "onnxruntime_qnn/libqnnhtpv81.cat",
+              "target": "libqnnhtpv81.cat",
+              "required": true
+            },
+            {
               "source": "onnxruntime_qnn/QnnSystem.dll",
               "target": "QnnSystem.dll",
               "required": true

@@ -93,28 +93,28 @@ def load_mel_calibration(preproc_path: str, wav_glob: str, max_samples: int):
     return feats_list
 
 
-def pick_device(hub):
-    """Pick the Snapdragon X Elite entry from AI Hub's device list."""
+def pick_device(hub, query: str = "Snapdragon X Elite"):
+    """Pick a device entry from AI Hub's device list matching the query."""
     devs = hub.get_devices()
-    elite = [d for d in devs if "X Elite" in d.name]
-    if not elite:
+    matched = [d for d in devs if query.lower() in d.name.lower()]
+    if not matched:
         names = sorted({d.name for d in devs})
         for n in names: print(f"  - {n}")
-        raise SystemExit("no 'X Elite' device on AI Hub — check the list above")
+        raise SystemExit(f"no device matching '{query}' on AI Hub — check the list above")
     # Prefer the plainest name (without trailing suffix) if multiple matches exist
-    elite.sort(key=lambda d: (len(d.name), d.name))
-    dev = elite[0]
+    matched.sort(key=lambda d: (len(d.name), d.name))
+    dev = matched[0]
     print(f"target device: {dev.name}")
     return dev
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--fp32-encoder", required=True,
+    ap.add_argument("--fp32-encoder", default="",
                     help="encoder-frozen.onnx from build_npu_encoder.py (static-shape FP32)")
-    ap.add_argument("--preprocessor", required=True,
+    ap.add_argument("--preprocessor", default="",
                     help="nemo128.onnx (same preprocessor the Rust runtime uses)")
-    ap.add_argument("--calib-glob", required=True,
+    ap.add_argument("--calib-glob", default="",
                     help='glob for WAVs, e.g. "C:/.../calibration/fleurs/*/*.wav"')
     ap.add_argument("--max-calib", type=int, default=64,
                     help="cap calibration samples (default 64, AI Hub recommends 100–500)")
@@ -125,11 +125,15 @@ def main():
                          "(useful for sanity-checking compile, will be slow at inference time)")
     ap.add_argument("--reuse-quantize-job", default="",
                     help="reuse an already-completed quantize job by its ID (skips re-upload + re-quantize)")
+    ap.add_argument("--reuse-compile-job", default="",
+                    help="reuse an already-submitted compile job by its ID (skips quantize and compile, waits and downloads)")
     ap.add_argument("--seconds", type=int, default=28,
                     help="static audio window length in seconds — MUST match the value used "
                          "in build_npu_encoder.py when generating the input encoder")
     ap.add_argument("--qairt-version", default="2.45",
                     help="AI Hub QAIRT major.minor line (default: 2.45, matching the shipped runtime)")
+    ap.add_argument("--device", default="Snapdragon X Elite",
+                    help="target device on Qualcomm AI Hub (default: 'Snapdragon X Elite', e.g. 'Snapdragon X2 Elite')")
     args = ap.parse_args()
 
     if not re.fullmatch(r"\d+\.\d+", args.qairt_version):
@@ -138,92 +142,100 @@ def main():
     global AUDIO_SECONDS, T_FIXED
     AUDIO_SECONDS = args.seconds
     T_FIXED = AUDIO_SECONDS * 100 + 1
-    print(f"window: {AUDIO_SECONDS} s → {T_FIXED} mel frames")
-
-    enc = Path(args.fp32_encoder)
-    if not enc.exists(): sys.exit(f"missing: {enc}")
-    data_file = enc.parent / (enc.name + ".data")
-    if not data_file.exists():
-        sys.exit(f"missing external data file: {data_file}")
-    # AI Hub requires "ONNX model directory format" for models with external
-    # weights — pass the parent directory, not the .onnx path itself. Parent
-    # must contain ONLY the .onnx and its .data (and nothing else), otherwise
-    # the upload includes unrelated files. We expect the caller to provide a
-    # clean staging directory.
-    other_files = [p for p in enc.parent.iterdir() if p.name not in (enc.name, data_file.name)]
-    if other_files:
-        sys.exit(
-            f"directory containing {enc.name} must hold only the .onnx + .onnx.data; "
-            f"found extra: {[p.name for p in other_files]}. "
-            f"Stage a clean dir first."
-        )
-    encoder_arg = str(enc.parent)
+    print(f"window: {AUDIO_SECONDS} s -> {T_FIXED} mel frames")
 
     import qai_hub as hub
 
-    device = pick_device(hub)
-
-    if args.reuse_quantize_job:
-        print(f"reusing quantize job {args.reuse_quantize_job}")
-        prior_job = hub.get_job(args.reuse_quantize_job)
-        quantized_model = prior_job.get_target_model()
-        if quantized_model is None:
-            sys.exit(f"prior quantize job not in RESULTS_READY: status={prior_job.get_status()}")
-        model_for_compile = quantized_model
-        print(f"  got quantized model: {quantized_model.model_id}")
-    elif args.skip_quantize:
-        model_for_compile = encoder_arg
-        print("skipping quantize — submitting FP32 directly")
-    else:
-        feats = load_mel_calibration(args.preprocessor, args.calib_glob, args.max_calib)
-        lengths = [np.array([T_FIXED], dtype=np.int64) for _ in feats]
-        calibration_data = {"audio_signal": feats, "length": lengths}
-
-        print(f"\nsubmitting quantize job ({len(feats)} samples)...")
-        t0 = time.time()
-        quantize_job = hub.submit_quantize_job(
-            model=encoder_arg,
-            calibration_data=calibration_data,
-            weights_dtype=hub.QuantizeDtype.INT8,
-            activations_dtype=hub.QuantizeDtype.INT16,
-            name="parakeet-encoder-htp-quantize",
-        )
-        print(f"  url: {quantize_job.url}")
-        print("  waiting for completion (this can take 5–30 minutes for a 600M param encoder)...")
-        quantized_model = quantize_job.get_target_model()
-        if quantized_model is None:
-            sys.exit(f"quantize failed: status={quantize_job.get_status()}\n  url: {quantize_job.url}")
-        print(f"  quantize done in {time.time()-t0:.0f}s")
-        model_for_compile = quantized_model
-
+    device = pick_device(hub, args.device)
     compile_options = (
-        "--target_runtime qnn_context_binary "
+        "--target_runtime precompiled_qnn_onnx "
         f"--truncate_64bit_io --qairt_version {args.qairt_version}"
     )
-    print(
-        f"\nsubmitting compile job (target: {device.name}, "
-        f"qnn_context_binary, QAIRT {args.qairt_version})..."
-    )
-    t0 = time.time()
-    compile_job = hub.submit_compile_job(
-        model=model_for_compile,
-        device=device,
-        input_specs={
-            "audio_signal": ((1, MEL_BINS, T_FIXED), "float32"),
-            "length":       ((1,), "int64"),
-        },
-        options=compile_options,
-        name="parakeet-encoder-htp-compile",
-    )
-    print(f"  url: {compile_job.url}")
-    print("  waiting for completion (typically 5–15 minutes)...")
-    target_model = compile_job.get_target_model()
+
+    if args.reuse_compile_job:
+        print(f"reusing compile job {args.reuse_compile_job}")
+        compile_job = hub.get_job(args.reuse_compile_job)
+        target_model = compile_job.get_target_model()
+    else:
+        enc = Path(args.fp32_encoder)
+        if not enc.exists(): sys.exit(f"missing: {enc}")
+        data_file = enc.parent / (enc.name + ".data")
+        if not data_file.exists():
+            sys.exit(f"missing external data file: {data_file}")
+        other_files = [p for p in enc.parent.iterdir() if p.name not in (enc.name, data_file.name)]
+        if other_files:
+            sys.exit(
+                f"directory containing {enc.name} must hold only the .onnx + .onnx.data; "
+                f"found extra: {[p.name for p in other_files]}. "
+                f"Stage a clean dir first."
+            )
+        encoder_arg = str(enc.parent)
+
+        if args.reuse_quantize_job:
+            print(f"reusing quantize job {args.reuse_quantize_job}")
+            prior_job = hub.get_job(args.reuse_quantize_job)
+            quantized_model = prior_job.get_target_model()
+            if quantized_model is None:
+                sys.exit(f"prior quantize job not in RESULTS_READY: status={prior_job.get_status()}")
+            model_for_compile = quantized_model
+            print(f"  got quantized model: {quantized_model.model_id}")
+        elif args.skip_quantize:
+            model_for_compile = encoder_arg
+            print("skipping quantize — submitting FP32 directly")
+        else:
+            feats = load_mel_calibration(args.preprocessor, args.calib_glob, args.max_calib)
+            lengths = [np.array([T_FIXED], dtype=np.int64) for _ in feats]
+            calibration_data = {"audio_signal": feats, "length": lengths}
+
+            print(f"\nsubmitting quantize job ({len(feats)} samples)...")
+            t0 = time.time()
+            quantize_job = hub.submit_quantize_job(
+                model=encoder_arg,
+                calibration_data=calibration_data,
+                weights_dtype=hub.QuantizeDtype.INT8,
+                activations_dtype=hub.QuantizeDtype.INT16,
+                name="parakeet-encoder-htp-quantize",
+            )
+            print(f"  url: {quantize_job.url}")
+            print("  waiting for completion (this can take 5–30 minutes for a 600M param encoder)...")
+            quantized_model = quantize_job.get_target_model()
+            if quantized_model is None:
+                sys.exit(f"quantize failed: status={quantize_job.get_status()}\n  url: {quantize_job.url}")
+            print(f"  quantize done in {time.time()-t0:.0f}s")
+            model_for_compile = quantized_model
+
+        print(
+            f"\nsubmitting compile job (target: {device.name}, "
+            f"precompiled_qnn_onnx, QAIRT {args.qairt_version})..."
+        )
+        t0 = time.time()
+        compile_job = hub.submit_compile_job(
+            model=model_for_compile,
+            device=device,
+            input_specs={
+                "audio_signal": ((1, MEL_BINS, T_FIXED), "float32"),
+                "length":       ((1,), "int64"),
+            },
+            options=compile_options,
+            name="parakeet-encoder-htp-compile",
+        )
+        print(f"  url: {compile_job.url}")
+        target_model = compile_job.get_target_model()
+
+    print("  waiting for compile completion (typically 5–15 minutes)...")
     if target_model is None:
         sys.exit(f"compile failed: status={compile_job.get_status()}\n  url: {compile_job.url}")
-    print(f"  compile done in {time.time()-t0:.0f}s")
-
     out = Path(args.out); out.parent.mkdir(parents=True, exist_ok=True)
-    target_model.download(str(out))
+    downloaded = target_model.download(str(out))
+    downloaded_path = Path(downloaded)
+    print(f"Downloaded model to {downloaded_path}")
+    if downloaded_path.suffix == ".zip":
+        import zipfile
+        print(f"extracting {downloaded_path} into {out.parent}...")
+        with zipfile.ZipFile(downloaded_path, "r") as z:
+            z.extractall(out.parent)
+            print("extracted archive members:", z.namelist())
+
     provenance = {
         "ai_hub_job_url": str(compile_job.url),
         "ai_hub_model_id": getattr(target_model, "model_id", None),
@@ -233,7 +245,7 @@ def main():
     }
     provenance_path = out.with_name(out.name + ".provenance.json")
     provenance_path.write_text(json.dumps(provenance, indent=2, sort_keys=True) + "\n")
-    print(f"\nDONE: {out} ({out.stat().st_size/1e6:.1f} MB)")
+    print(f"\nDONE: {out}")
     print(f"provenance: {provenance_path}")
     print()
     print("Next steps in Rust:")

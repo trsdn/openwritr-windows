@@ -39,6 +39,8 @@ def main():
                     help="skip AI Hub quantize+compile (use existing .bin)")
     ap.add_argument("--skip-hf", action="store_true",
                     help="skip Hugging Face upload")
+    ap.add_argument("--device", default="Snapdragon X Elite",
+                    help="target device on Qualcomm AI Hub (default: 'Snapdragon X Elite', e.g. 'Snapdragon X2 Elite')")
     args = ap.parse_args()
 
     secs = args.seconds
@@ -83,6 +85,7 @@ def main():
             "--calib-glob", CALIB_GLOB,
             "--max-calib", str(args.max_calib),
             "--seconds", str(secs),
+            "--device", args.device,
             "--out", final_dir / "encoder-model.bin",
         ])
         print(f"\n=== AI Hub done in {time.time()-t0:.0f} s ===\n")

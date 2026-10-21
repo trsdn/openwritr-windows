@@ -18,6 +18,9 @@
         { "source_root": "runtime", "source": "QnnHtpV73Stub.dll", "target": "QnnHtpV73Stub.dll", "kind": "pe" },
         { "source_root": "runtime", "source": "libQnnHtpV73Skel.so", "target": "libQnnHtpV73Skel.so", "kind": "file" },
         { "source_root": "runtime", "source": "libqnnhtpv73.cat", "target": "libqnnhtpv73.cat", "kind": "file" },
+        { "source_root": "runtime", "source": "QnnHtpV81Stub.dll", "target": "QnnHtpV81Stub.dll", "kind": "pe" },
+        { "source_root": "runtime", "source": "libQnnHtpV81Skel.so", "target": "libQnnHtpV81Skel.so", "kind": "file" },
+        { "source_root": "runtime", "source": "libqnnhtpv81.cat", "target": "libqnnhtpv81.cat", "kind": "file" },
         { "source_root": "runtime", "source": "QnnSystem.dll", "target": "QnnSystem.dll", "kind": "pe" },
         { "source_root": "runtime", "source": "third-party-licenses/onnxruntime-LICENSE.txt", "target": "third-party-licenses/onnxruntime-LICENSE.txt", "kind": "file" },
         { "source_root": "runtime", "source": "third-party-licenses/onnxruntime-ThirdPartyNotices.txt", "target": "third-party-licenses/onnxruntime-ThirdPartyNotices.txt", "kind": "file" },
@@ -59,6 +62,9 @@
         "QnnHtpV73Stub.dll",
         "libQnnHtpV73Skel.so",
         "libqnnhtpv73.cat",
+        "QnnHtpV81Stub.dll",
+        "libQnnHtpV81Skel.so",
+        "libqnnhtpv81.cat",
         "QnnSystem.dll"
       ]
     }

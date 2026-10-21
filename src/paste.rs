@@ -5,6 +5,7 @@ use once_cell::sync::{Lazy, OnceCell};
 use parking_lot::{Condvar, Mutex};
 use std::{
     mem::size_of,
+    path::Path,
     ptr,
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -15,17 +16,13 @@ use std::{
     time::{Duration, Instant},
 };
 use windows::Win32::{
-    Foundation::CLIPBRD_E_CANT_OPEN,
-    System::{
-        Com::IDataObject,
-        Ole::{
-            OleFlushClipboard, OleGetClipboard, OleInitialize, OleSetClipboard, OleUninitialize,
-            CF_UNICODETEXT,
-        },
+    Foundation::HWND,
+    UI::WindowsAndMessaging::{
+        GetAncestor, GetClassNameW, GetForegroundWindow, GetWindowThreadProcessId, GA_ROOT,
     },
 };
 use windows_sys::Win32::{
-    Foundation::{GetLastError, GlobalFree, SetLastError},
+    Foundation::{CloseHandle, GetLastError, GlobalFree, SetLastError},
     System::{
         DataExchange::{
             CloseClipboard, EmptyClipboard, EnumClipboardFormats, GetClipboardData,
@@ -33,9 +30,11 @@ use windows_sys::Win32::{
             SetClipboardData,
         },
         Memory::{GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE},
+        Threading::{OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION},
     },
 };
 
+pub const CF_UNICODETEXT: u32 = 13;
 const CLIPBOARD_OPEN_ATTEMPTS: usize = 5;
 const CLIPBOARD_OPEN_RETRY_DELAY: Duration = Duration::from_millis(5);
 const CLIPBOARD_RESTORE_DELAY: Duration = Duration::from_millis(400);
@@ -121,9 +120,17 @@ enum InjectionFailureAction {
     RestoreAfterDelay,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PasteShortcut {
+    CtrlV,
+    ShiftInsert,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum ClipboardSnapshot {
     Empty,
-    DataObject(IDataObject),
+    Text(String),
+    NonText,
 }
 
 enum RestoreCommand {
@@ -139,8 +146,6 @@ struct PendingClipboardRestore {
 struct ClipboardOpenGuard {
     closed: bool,
 }
-
-struct OleClipboardApartment;
 
 struct PasteSimulationError {
     error: anyhow::Error,
@@ -286,7 +291,9 @@ fn paste(
         }
     }
 
-    let paste_result = send_paste_keys(&mut enigo);
+    let shortcut = detect_current_paste_shortcut();
+    tracing::info!(?shortcut, "injecting paste keys for target window");
+    let paste_result = send_paste_keys(&mut enigo, shortcut);
     drop(injection_guard);
     match paste_result {
         Ok(()) => {
@@ -465,42 +472,45 @@ impl Drop for RestorationPermit {
 
 impl ClipboardSnapshot {
     fn capture() -> Result<(Self, ClipboardIdentity)> {
-        let initial_identity = current_clipboard_identity()
-            .context("read the Windows clipboard sequence before automatic paste")?;
-        let snapshot = if clipboard_has_formats()
-            .context("inspect the current clipboard before automatic paste")?
-        {
-            Self::DataObject(ole_clipboard_retry(
-                "snapshot the clipboard contents",
-                || unsafe { OleGetClipboard() },
-            )?)
-        } else {
-            Self::Empty
-        };
-        let final_identity = current_clipboard_identity()
-            .context("re-read the Windows clipboard sequence after snapshotting it")?;
+        with_open_clipboard(
+            "snapshot the Windows clipboard before automatic paste",
+            || {
+                let initial_identity = current_clipboard_identity()?;
+                let snapshot = if let Some(text) = read_clipboard_unicode_text()? {
+                    Self::Text(text)
+                } else if clipboard_has_formats_opened()? {
+                    Self::NonText
+                } else {
+                    Self::Empty
+                };
+                let final_identity = current_clipboard_identity()?;
 
-        if initial_identity.sequence != final_identity.sequence {
-            return Err(anyhow!(
-                "automatic paste aborted because the clipboard changed while OpenWritr was snapshotting it"
-            ));
-        }
+                if initial_identity.sequence != final_identity.sequence {
+                    return Err(anyhow!(
+                    "automatic paste aborted because the clipboard changed while OpenWritr was snapshotting it"
+                ));
+                }
 
-        Ok((snapshot, final_identity))
+                Ok((snapshot, final_identity))
+            },
+        )
     }
 
     fn restore_unconditionally(&self) -> Result<()> {
         match self {
             ClipboardSnapshot::Empty => clear_clipboard(),
-            ClipboardSnapshot::DataObject(data_object) => {
-                ole_clipboard_retry("restore the clipboard snapshot", || unsafe {
-                    OleSetClipboard(data_object)
-                })?;
-                ole_clipboard_retry("persist the restored clipboard snapshot", || unsafe {
-                    OleFlushClipboard()
-                })?;
-                Ok(())
+            ClipboardSnapshot::Text(text) => {
+                with_open_clipboard("restore the clipboard snapshot", || {
+                    unsafe {
+                        if EmptyClipboard() == 0 {
+                            return Err(std::io::Error::last_os_error())
+                                .context("empty the Windows clipboard");
+                        }
+                    }
+                    write_clipboard_text(text)
+                })
             }
+            ClipboardSnapshot::NonText => Ok(()),
         }
     }
 
@@ -520,16 +530,25 @@ impl ClipboardSnapshot {
                     Ok(RestoreDecision::Restore)
                 })
             }
-            ClipboardSnapshot::DataObject(data_object) => {
-                if current_clipboard_identity()? != expected_identity {
-                    return Ok(RestoreDecision::SkipHandoffChanged);
-                }
-                ole_clipboard_retry("restore the clipboard snapshot", || unsafe {
-                    OleSetClipboard(data_object)
-                })?;
-                ole_clipboard_retry("persist the restored clipboard snapshot", || unsafe {
-                    OleFlushClipboard()
-                })?;
+            ClipboardSnapshot::Text(text) => {
+                with_open_clipboard("restore the clipboard snapshot", || {
+                    if current_clipboard_identity()? != expected_identity {
+                        return Ok(RestoreDecision::SkipHandoffChanged);
+                    }
+                    unsafe {
+                        if EmptyClipboard() == 0 {
+                            return Err(std::io::Error::last_os_error())
+                                .context("empty the Windows clipboard");
+                        }
+                    }
+                    write_clipboard_text(text)?;
+                    Ok(RestoreDecision::Restore)
+                })
+            }
+            ClipboardSnapshot::NonText => {
+                tracing::info!(
+                    "clipboard contained non-text formats before paste; keeping transcript on clipboard"
+                );
                 Ok(RestoreDecision::Restore)
             }
         }
@@ -550,7 +569,7 @@ impl InjectedClipboardPayload {
             text: normalized_text,
             marker,
             marker_format,
-            required_formats: vec![u32::from(CF_UNICODETEXT.0), marker_format],
+            required_formats: vec![CF_UNICODETEXT, marker_format],
         })
     }
 }
@@ -593,21 +612,6 @@ impl Drop for ClipboardOpenGuard {
     }
 }
 
-impl OleClipboardApartment {
-    fn initialize() -> Result<Self> {
-        unsafe { OleInitialize(None) }.context("initialize the OLE clipboard apartment")?;
-        Ok(Self)
-    }
-}
-
-impl Drop for OleClipboardApartment {
-    fn drop(&mut self) {
-        unsafe {
-            OleUninitialize();
-        }
-    }
-}
-
 impl PasteSimulationError {
     fn new(error: anyhow::Error, paste_attempted: bool) -> Self {
         Self {
@@ -626,7 +630,6 @@ fn run_clipboard_worker(
 ) {
     let mut ready_sent = false;
     let result: Result<()> = (|| {
-        let _ole = OleClipboardApartment::initialize()?;
         let (snapshot, captured_identity) = ClipboardSnapshot::capture()?;
         let payload = InjectedClipboardPayload::new(&text)?;
         let injected_identity = match write_injected_payload(captured_identity, &payload) {
@@ -783,7 +786,7 @@ fn observe_current_clipboard(payload: &InjectedClipboardPayload) -> Result<Clipb
         let marker = read_clipboard_marker(payload.marker_format)?;
         let mut formats = Vec::with_capacity(2);
         if text.is_some() {
-            formats.push(u32::from(CF_UNICODETEXT.0));
+            formats.push(CF_UNICODETEXT);
         }
         if marker.is_some() {
             formats.push(payload.marker_format);
@@ -825,35 +828,183 @@ fn should_restore(
     RestoreDecision::Restore
 }
 
-fn send_paste_keys(enigo: &mut Enigo) -> std::result::Result<(), PasteSimulationError> {
-    if let Err(error) = enigo
-        .key(Key::Control, Direction::Press)
-        .context("press Ctrl for paste")
-    {
-        return Err(PasteSimulationError::new(error, false));
-    }
+fn send_paste_keys(
+    enigo: &mut Enigo,
+    shortcut: PasteShortcut,
+) -> std::result::Result<(), PasteSimulationError> {
+    match shortcut {
+        PasteShortcut::CtrlV => {
+            if let Err(error) = enigo
+                .key(Key::Control, Direction::Press)
+                .context("press Ctrl for paste")
+            {
+                return Err(PasteSimulationError::new(error, false));
+            }
 
-    if let Err(error) = enigo
-        .key(Key::Unicode('v'), Direction::Click)
-        .context("press V for paste")
-    {
-        let _ = enigo.key(Key::Control, Direction::Release);
-        return Err(PasteSimulationError::new(error, false));
-    }
+            if let Err(error) = enigo
+                .key(Key::Unicode('v'), Direction::Click)
+                .context("press V for paste")
+            {
+                let _ = enigo.key(Key::Control, Direction::Release);
+                return Err(PasteSimulationError::new(error, false));
+            }
 
-    if let Err(error) = enigo
-        .key(Key::Control, Direction::Release)
-        .context("release Ctrl after paste")
-    {
-        let _ = enigo.key(Key::Control, Direction::Release);
-        return Err(PasteSimulationError::new(error, true));
-    }
+            if let Err(error) = enigo
+                .key(Key::Control, Direction::Release)
+                .context("release Ctrl after paste")
+            {
+                let _ = enigo.key(Key::Control, Direction::Release);
+                return Err(PasteSimulationError::new(error, true));
+            }
 
-    Ok(())
+            Ok(())
+        }
+        PasteShortcut::ShiftInsert => {
+            if let Err(error) = enigo
+                .key(Key::Shift, Direction::Press)
+                .context("press Shift for paste")
+            {
+                return Err(PasteSimulationError::new(error, false));
+            }
+
+            if let Err(error) = enigo
+                .key(Key::Insert, Direction::Click)
+                .context("press Insert for paste")
+            {
+                let _ = enigo.key(Key::Shift, Direction::Release);
+                return Err(PasteSimulationError::new(error, false));
+            }
+
+            if let Err(error) = enigo
+                .key(Key::Shift, Direction::Release)
+                .context("release Shift after paste")
+            {
+                let _ = enigo.key(Key::Shift, Direction::Release);
+                return Err(PasteSimulationError::new(error, true));
+            }
+
+            Ok(())
+        }
+    }
 }
 
-fn clipboard_has_formats() -> Result<bool> {
-    with_open_clipboard("inspect the current clipboard contents", || unsafe {
+pub fn detect_current_paste_shortcut() -> PasteShortcut {
+    let foreground = unsafe { GetForegroundWindow() };
+    if foreground.0.is_null() {
+        return PasteShortcut::CtrlV;
+    }
+    let root = unsafe { GetAncestor(foreground, GA_ROOT) };
+    let hwnd = if root.0.is_null() { foreground } else { root };
+
+    let mut process_id = 0;
+    unsafe {
+        GetWindowThreadProcessId(hwnd, Some(&mut process_id));
+    }
+    if process_id == 0 && hwnd != foreground {
+        unsafe {
+            GetWindowThreadProcessId(foreground, Some(&mut process_id));
+        }
+    }
+
+    let shortcut = detect_paste_shortcut_for_window(hwnd, process_id);
+    if shortcut == PasteShortcut::ShiftInsert {
+        return shortcut;
+    }
+    if hwnd != foreground {
+        let fg_shortcut = detect_paste_shortcut_for_window(foreground, process_id);
+        if fg_shortcut == PasteShortcut::ShiftInsert {
+            return fg_shortcut;
+        }
+    }
+    PasteShortcut::CtrlV
+}
+
+#[allow(dead_code)]
+pub fn detect_paste_shortcut_for_target(hwnd: isize, process_id: u32) -> PasteShortcut {
+    let hwnd = HWND(hwnd as *mut _);
+    detect_paste_shortcut_for_window(hwnd, process_id)
+}
+
+pub fn detect_paste_shortcut_for_window(hwnd: HWND, process_id: u32) -> PasteShortcut {
+    let class_name = window_class_name(hwnd);
+    let image_name = if process_id != 0 {
+        process_image_name(process_id)
+    } else {
+        None
+    };
+    determine_paste_shortcut(class_name.as_deref(), image_name.as_deref())
+}
+
+pub fn determine_paste_shortcut(
+    class_name: Option<&str>,
+    image_name: Option<&str>,
+) -> PasteShortcut {
+    if let Some(cls) = class_name {
+        if cls.eq_ignore_ascii_case("Emacs")
+            || cls.eq_ignore_ascii_case("CASCADIA_HOSTING_WINDOW_CLASS")
+            || cls.eq_ignore_ascii_case("ConsoleWindowClass")
+            || cls.eq_ignore_ascii_case("mintty")
+            || cls.eq_ignore_ascii_case("PuTTY")
+        {
+            return PasteShortcut::ShiftInsert;
+        }
+    }
+
+    if let Some(img) = image_name {
+        let img = img.to_ascii_lowercase();
+        if img == "emacs.exe"
+            || img == "emacs-w32.exe"
+            || img == "runemacs.exe"
+            || img == "windowsterminal.exe"
+            || img == "windowsterminalpreview.exe"
+            || img == "mintty.exe"
+            || img == "conhost.exe"
+            || img == "wezterm-gui.exe"
+            || img == "alacritty.exe"
+            || img == "hyper.exe"
+            || img == "putty.exe"
+        {
+            return PasteShortcut::ShiftInsert;
+        }
+    }
+
+    PasteShortcut::CtrlV
+}
+
+fn window_class_name(hwnd: HWND) -> Option<String> {
+    if hwnd.0.is_null() {
+        return None;
+    }
+    let mut buffer = [0u16; 256];
+    let len = unsafe { GetClassNameW(hwnd, &mut buffer) };
+    if len <= 0 {
+        return None;
+    }
+    Some(String::from_utf16_lossy(&buffer[..len as usize]))
+}
+
+fn process_image_name(process_id: u32) -> Option<String> {
+    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, process_id) };
+    if process.is_null() {
+        return None;
+    }
+    let mut buffer = [0u16; 1024];
+    let mut size = buffer.len() as u32;
+    let success =
+        unsafe { QueryFullProcessImageNameW(process, 0, buffer.as_mut_ptr(), &mut size) } != 0;
+    unsafe {
+        CloseHandle(process);
+    }
+    if !success || size == 0 {
+        return None;
+    }
+    let path = String::from_utf16_lossy(&buffer[..size as usize]);
+    let filename = Path::new(&path).file_name()?.to_str()?.to_ascii_lowercase();
+    Some(filename)
+}
+
+fn clipboard_has_formats_opened() -> Result<bool> {
+    unsafe {
         SetLastError(0);
         let first_format = EnumClipboardFormats(0);
         if first_format == 0 {
@@ -867,7 +1018,15 @@ fn clipboard_has_formats() -> Result<bool> {
         } else {
             Ok(true)
         }
-    })
+    }
+}
+
+#[allow(dead_code)]
+fn clipboard_has_formats() -> Result<bool> {
+    with_open_clipboard(
+        "inspect the current clipboard contents",
+        clipboard_has_formats_opened,
+    )
 }
 
 fn current_clipboard_identity() -> Result<ClipboardIdentity> {
@@ -903,7 +1062,7 @@ fn write_clipboard_text(text: &str) -> Result<()> {
             encoded.len() * size_of::<u16>(),
         )
     };
-    set_clipboard_memory(u32::from(CF_UNICODETEXT.0), bytes)
+    set_clipboard_memory(CF_UNICODETEXT, bytes)
         .context("write the transcript to the Windows clipboard")
 }
 
@@ -954,7 +1113,7 @@ fn allocate_moveable_memory(bytes: &[u8]) -> Result<*mut core::ffi::c_void> {
 }
 
 fn read_clipboard_unicode_text() -> Result<Option<String>> {
-    let handle = unsafe { GetClipboardData(u32::from(CF_UNICODETEXT.0)) };
+    let handle = unsafe { GetClipboardData(CF_UNICODETEXT) };
     if handle.is_null() {
         return Ok(None);
     }
@@ -1037,25 +1196,6 @@ fn read_global_bytes(handle: *mut core::ffi::c_void) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-fn ole_clipboard_retry<T>(
-    action: &str,
-    mut operation: impl FnMut() -> windows::core::Result<T>,
-) -> Result<T> {
-    let mut attempts = CLIPBOARD_OPEN_ATTEMPTS;
-    loop {
-        match operation() {
-            Ok(value) => return Ok(value),
-            Err(error) if error.code() == CLIPBRD_E_CANT_OPEN && attempts > 0 => {
-                attempts -= 1;
-                thread::sleep(CLIPBOARD_OPEN_RETRY_DELAY);
-            }
-            Err(error) => {
-                return Err(error).with_context(|| format!("{action} through the OLE clipboard"));
-            }
-        }
-    }
-}
-
 fn with_open_clipboard<T>(action: &str, operation: impl FnOnce() -> Result<T>) -> Result<T> {
     let guard = ClipboardOpenGuard::open(action)?;
     let result = operation();
@@ -1106,10 +1246,10 @@ mod tests {
         guard_rejection_action, injection_failure_action, normalize_clipboard_text, should_restore,
         ClipboardIdentity, ClipboardObservation, DeliveryMode, GuardRejectionAction,
         InjectedClipboardPayload, InjectionFailureAction, RestorationBarrier, RestoreDecision,
+        CF_UNICODETEXT,
     };
     use std::sync::Arc;
     use std::time::Duration;
-    use windows::Win32::System::Ole::CF_UNICODETEXT;
 
     const MARKER_FORMAT: u32 = 0xC123;
 
@@ -1118,7 +1258,7 @@ mod tests {
             text: normalize_clipboard_text(text),
             marker: "openwritr:test:1".to_string(),
             marker_format: MARKER_FORMAT,
-            required_formats: vec![u32::from(CF_UNICODETEXT.0), MARKER_FORMAT],
+            required_formats: vec![CF_UNICODETEXT, MARKER_FORMAT],
         }
     }
 
@@ -1151,7 +1291,7 @@ mod tests {
                 Some(7),
                 Some("hello"),
                 Some("openwritr:test:1"),
-                vec![u32::from(CF_UNICODETEXT.0), MARKER_FORMAT],
+                vec![CF_UNICODETEXT, MARKER_FORMAT],
             ),
         );
 
@@ -1172,7 +1312,7 @@ mod tests {
                 Some(7),
                 Some("hello"),
                 Some("openwritr:test:1"),
-                vec![u32::from(CF_UNICODETEXT.0), MARKER_FORMAT],
+                vec![CF_UNICODETEXT, MARKER_FORMAT],
             ),
         );
 
@@ -1193,7 +1333,7 @@ mod tests {
                 Some(8),
                 Some("hello"),
                 Some("openwritr:test:1"),
-                vec![u32::from(CF_UNICODETEXT.0), MARKER_FORMAT],
+                vec![CF_UNICODETEXT, MARKER_FORMAT],
             ),
         );
 
@@ -1214,7 +1354,7 @@ mod tests {
                 Some(7),
                 Some("goodbye"),
                 Some("openwritr:test:1"),
-                vec![u32::from(CF_UNICODETEXT.0), MARKER_FORMAT],
+                vec![CF_UNICODETEXT, MARKER_FORMAT],
             ),
         );
 
@@ -1235,7 +1375,7 @@ mod tests {
                 Some(7),
                 Some("hello"),
                 Some("someone-else"),
-                vec![u32::from(CF_UNICODETEXT.0), MARKER_FORMAT],
+                vec![CF_UNICODETEXT, MARKER_FORMAT],
             ),
         );
 
@@ -1256,7 +1396,7 @@ mod tests {
                 Some(7),
                 Some("hello"),
                 Some("openwritr:test:1"),
-                vec![u32::from(CF_UNICODETEXT.0)],
+                vec![CF_UNICODETEXT],
             ),
         );
 
@@ -1277,7 +1417,7 @@ mod tests {
                 Some(7),
                 Some("hello"),
                 Some("openwritr:test:1"),
-                vec![u32::from(CF_UNICODETEXT.0), MARKER_FORMAT, 0xC124, 0xC125],
+                vec![CF_UNICODETEXT, MARKER_FORMAT, 0xC124, 0xC125],
             ),
         );
 
@@ -1344,5 +1484,80 @@ mod tests {
         assert!(barrier.wait_for_delay_or_cancel(Duration::from_secs(60)));
         drop(permit);
         assert!(barrier.wait_for_completion(Duration::ZERO));
+    }
+
+    #[test]
+    fn selects_shift_insert_for_emacs_and_terminal_targets() {
+        use super::{determine_paste_shortcut, PasteShortcut};
+
+        // Emacs by class name
+        assert_eq!(
+            determine_paste_shortcut(Some("Emacs"), None),
+            PasteShortcut::ShiftInsert
+        );
+        assert_eq!(
+            determine_paste_shortcut(Some("emacs"), None),
+            PasteShortcut::ShiftInsert
+        );
+        // Emacs by process image name
+        assert_eq!(
+            determine_paste_shortcut(None, Some("emacs.exe")),
+            PasteShortcut::ShiftInsert
+        );
+        assert_eq!(
+            determine_paste_shortcut(None, Some("runemacs.exe")),
+            PasteShortcut::ShiftInsert
+        );
+
+        // Windows Terminal
+        assert_eq!(
+            determine_paste_shortcut(Some("CASCADIA_HOSTING_WINDOW_CLASS"), None),
+            PasteShortcut::ShiftInsert
+        );
+        assert_eq!(
+            determine_paste_shortcut(None, Some("windowsterminal.exe")),
+            PasteShortcut::ShiftInsert
+        );
+        assert_eq!(
+            determine_paste_shortcut(None, Some("WindowsTerminal.exe")),
+            PasteShortcut::ShiftInsert
+        );
+
+        // Traditional Console / mintty / putty
+        assert_eq!(
+            determine_paste_shortcut(Some("ConsoleWindowClass"), None),
+            PasteShortcut::ShiftInsert
+        );
+        assert_eq!(
+            determine_paste_shortcut(Some("mintty"), None),
+            PasteShortcut::ShiftInsert
+        );
+        assert_eq!(
+            determine_paste_shortcut(None, Some("mintty.exe")),
+            PasteShortcut::ShiftInsert
+        );
+        assert_eq!(
+            determine_paste_shortcut(Some("PuTTY"), None),
+            PasteShortcut::ShiftInsert
+        );
+    }
+
+    #[test]
+    fn selects_ctrl_v_for_standard_windows_applications() {
+        use super::{determine_paste_shortcut, PasteShortcut};
+
+        assert_eq!(
+            determine_paste_shortcut(Some("Notepad"), Some("notepad.exe")),
+            PasteShortcut::CtrlV
+        );
+        assert_eq!(
+            determine_paste_shortcut(Some("Chrome_WidgetWin_1"), Some("chrome.exe")),
+            PasteShortcut::CtrlV
+        );
+        assert_eq!(
+            determine_paste_shortcut(Some("Chrome_WidgetWin_1"), Some("code.exe")),
+            PasteShortcut::CtrlV
+        );
+        assert_eq!(determine_paste_shortcut(None, None), PasteShortcut::CtrlV);
     }
 }
