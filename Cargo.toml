@@ -46,7 +46,7 @@ arboard = "3"
 enigo = "0.6"
 
 # Packaging
-zip = { version = "2", default-features = false, features = ["deflate"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
 
 # ASR — ONNX Runtime via dynamic loading.
 # api-24 requires native ORT >= 1.24; the exact DLL tuple is pinned in
